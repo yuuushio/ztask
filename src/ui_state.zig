@@ -63,7 +63,7 @@ pub const UiState = struct {
         self.ensureValidSelection(list_len, viewport_height);
     }
 
-    fn ensureValidSelection(
+    pub fn ensureValidSelection(
         self: *UiState,
         list_len: usize,
         viewport_height: usize,
