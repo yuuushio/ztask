@@ -4,6 +4,11 @@ const mem = std.mem;
 const vaxis = @import("vaxis");
 
 const TaskIndex = @import("task_index.zig").TaskIndex;
+const ui_state_mod = @import("ui_state.zig");
+const UiState = ui_state_mod.UiState;
+const ListKind = ui_state_mod.ListKind;
+
+const tui = @import("tui.zig");
 
 const App = struct {
     config_dir: []const u8,
@@ -73,14 +78,23 @@ fn openOrCreateRw(dir: *fs.Dir, name: []const u8) !fs.File {
     };
 }
 
+
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer {
+        const status = gpa.deinit();
+        if (status == .leak) {
+            // In a real app you would probably log this instead.
+            std.log.err("memory leak detected in GPA", .{});
+        }
+    }
+    const allocator = gpa.allocator();
 
     var app = try App.init(allocator);
     defer app.deinit(allocator);
 
-    std.debug.print(
-        "config dir: {s}\nTODO: {d} tasks\nDONE: {d} tasks\n",
-        .{ app.config_dir, app.index.todo.len, app.index.done.len },
-    );
+    var ui = UiState.init();
+
+    try tui.run(allocator, &app.index, &ui);
+
 }
