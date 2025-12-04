@@ -1,16 +1,20 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 
-const UiState = @import("ui_state.zig").UiState;
-const TaskIndex = @import("task_index.zig").TaskIndex;
-
 const Cell = vaxis.Cell;
 
-// Event type for the vaxis loop (matches the libvaxis README example)
+const task_mod = @import("task_index.zig");
+const TaskIndex = task_mod.TaskIndex;
+
+const ui_mod = @import("ui_state.zig");
+const UiState = ui_mod.UiState;
+const ListKind = ui_mod.ListKind;
+
+/// Events we care about. Matches libvaxis low-level API requirements:
+/// vaxis will only send .key_press / .winsize because those are present. 
 const Event = union(enum) {
     key_press: vaxis.Key,
     winsize: vaxis.Winsize,
-    focus_in,
 };
 
 pub fn run(
@@ -18,16 +22,16 @@ pub fn run(
     index: *const TaskIndex,
     ui: *UiState,
 ) !void {
-    _ = ui; // unused for now; will drive selection/navigation later
-
-    // TTY + Vaxis setup as in the official low-level example.
+    // Initialize TTY exactly as in libvaxis README. 
     var buffer: [1024]u8 = undefined;
     var tty = try vaxis.Tty.init(&buffer);
     defer tty.deinit();
 
+    // Initialize Vaxis
     var vx = try vaxis.init(allocator, .{});
     defer vx.deinit(allocator, tty.writer());
 
+    // Event loop: vaxis reads the TTY in a separate thread.
     var loop: vaxis.Loop(Event) = .{
         .tty = &tty,
         .vaxis = &vx,
@@ -36,121 +40,168 @@ pub fn run(
     try loop.start();
     defer loop.stop();
 
+    // Alternate screen, with proper teardown.
     try vx.enterAltScreen(tty.writer());
     defer {
-        // Best-effort cleanup; ignore failures on teardown.
         _ = vx.exitAltScreen(tty.writer()) catch {};
         _ = vx.resetState(tty.writer()) catch {};
     }
 
-    // Probe terminal capabilities; required for libvaxis feature detection.
+    // Feature detection via terminal queries.
     try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
 
     var running = true;
     while (running) {
         const event = loop.nextEvent();
+
         switch (event) {
             .key_press => |key| {
-                // Hard exit: Ctrl+C or plain 'q'
-                if (key.matches('c', .{ .ctrl = true }) or
-                    key.matches('q', .{}))
-                {
+                if (key.matches('c', .{ .ctrl = true }) or key.matches('q', .{})) {
                     running = false;
                 }
-                // Additional key handling will come later.
+                // We will wire arrow keys into UiState.moveSelection later.
             },
             .winsize => |ws| {
-                // Keep vaxis’ internal screen in sync with terminal size.
                 try vx.resize(allocator, tty.writer(), ws);
             },
-            else => {},
         }
 
         const win = vx.window();
         win.clear();
 
-        try renderHeader(win);
-        try renderCounts(win, index);
+        drawHeader(win);
+        drawCounts(win, index);
+        drawTodoList(win, index, ui);
 
         try vx.render(tty.writer());
     }
 }
 
-fn renderHeader(win: anytype) !void {
-    const header = "ztask  –  Ctrl+C or q to quit";
+fn drawHeader(win: vaxis.Window) void {
+    const title = "ztask";
 
-    const SizeInt = @TypeOf(win.width);
+    const term_width: usize = @intCast(win.width);
+    const row: u16 = 0;
 
-    const row: SizeInt = 0;
-    const width: SizeInt = win.width;
+    const title_len = title.len;
+    const total_width = title_len;
 
-    const header_len: usize = header.len;
-    const header_width: SizeInt = @intCast(header_len);
+    var start_col: usize = 0;
+    if (term_width > total_width) {
+        start_col = (term_width - total_width) / 2;
+    }
 
-    const start_col: SizeInt = if (width > header_width)
-        (width - header_width) / 2
-    else
-        0;
+    const style: vaxis.Style = .{
+        .bold = true,
+        .fg = .{ .rgb = .{ 200, 200, 255 } },
+    };
 
-    const style: vaxis.Style = .{ .bold = true };
+    var col = start_col;
 
     var i: usize = 0;
-    while (i < header_len) : (i += 1) {
-        const col = start_col + @as(SizeInt, @intCast(i));
-        if (col >= width) break;
-
-        const ch = header[i];
-
+    while (i < title_len) : (i += 1) {
+        const g = title[i .. i + 1]; // slice into static string, stable
         const cell: Cell = .{
-            .char = .{
-                .grapheme = &[_]u8{ ch },
-                .width = 1,
-            },
+            .char = .{ .grapheme = g, .width = 1 },
             .style = style,
         };
-
-        _ = win.writeCell(col, row, cell);
+        _ = win.writeCell(@intCast(col), row, cell);
+        col += 1;
     }
 }
 
-fn renderCounts(win: anytype, index: *const TaskIndex) !void {
-    const SizeInt = @TypeOf(win.width);
-
+fn drawCounts(win: vaxis.Window, index: *const TaskIndex) void {
     var buf: [64]u8 = undefined;
-    const text = try std.fmt.bufPrint(
+    const text = std.fmt.bufPrint(
         &buf,
-        "TODO: {d}    DONE: {d}",
+        "TODO: {d}  DONE: {d}",
         .{ index.todo.len, index.done.len },
-    );
+    ) catch buf[0..0];
 
-    const row: SizeInt = if (win.height > 2) 2 else 0;
-    const width: SizeInt = win.width;
+    const term_width: usize = @intCast(win.width);
+    const row: u16 = if (win.height > 2) 2 else 0;
 
-    const text_len: usize = text.len;
-    const text_width: SizeInt = @intCast(text_len);
+    const text_len = text.len;
+    var start_col: usize = 0;
+    if (term_width > text_len) {
+        start_col = (term_width - text_len) / 2;
+    }
 
-    const start_col: SizeInt = if (width > text_width)
-        (width - text_width) / 2
-    else
-        0;
+    const style: vaxis.Style = .{
+        .fg = .{ .rgb = .{ 180, 180, 180 } },
+    };
 
-    const style: vaxis.Style = .{};
-
+    var col = start_col;
     var i: usize = 0;
     while (i < text_len) : (i += 1) {
-        const col = start_col + @as(SizeInt, @intCast(i));
-        if (col >= width) break;
-
-        const ch = text[i];
-
+        const g = text[i .. i + 1]; // slice into `buf`, stable for this frame
         const cell: Cell = .{
-            .char = .{
-                .grapheme = &[_]u8{ ch },
-                .width = 1,
-            },
+            .char = .{ .grapheme = g, .width = 1 },
             .style = style,
         };
+        _ = win.writeCell(@intCast(col), row, cell);
+        col += 1;
+    }
+}
 
-        _ = win.writeCell(col, row, cell);
+/// Render the TODO list starting a few rows below the header.
+/// Uses TaskIndex.todo[i].text directly so what you wrote in todo.txt
+/// shows verbatim.
+fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState) void {
+    const tasks = index.todo;
+
+    if (tasks.len == 0) return;
+
+    const term_height: usize = @intCast(win.height);
+    const term_width: usize = @intCast(win.width);
+
+    // Rows 0 and 2 are used for header and counts. Leave one blank line.
+    const start_row: usize = 4;
+    if (term_height <= start_row) return;
+
+    const viewport_height = term_height - start_row;
+
+    // We have not wired scrolling yet, so force scroll_offset to 0
+    // and clamp selected_index into range.
+    if (ui.selected_index >= tasks.len) {
+        ui.selected_index = tasks.len - 1;
+    }
+    ui.scroll_offset = 0;
+
+    const end_index = @min(tasks.len, ui.scroll_offset + viewport_height);
+
+    const base_style: vaxis.Style = .{};
+    const sel_style: vaxis.Style = .{
+        .bold = true,
+        .fg = .{ .rgb = .{ 220, 220, 255 } },
+    };
+
+    var row = start_row;
+    var idx = ui.scroll_offset;
+    while (idx < end_index and row < term_height) : ({
+        idx += 1;
+        row += 1;
+    }) {
+        const task = tasks[idx];
+        const text = task.text;
+
+        const style = if (ui.focus == .todo and ui.selected_index == idx)
+            sel_style
+        else
+            base_style;
+
+        var col: usize = 0;
+        const max_cols = term_width;
+
+        var i: usize = 0;
+        while (i < text.len and col < max_cols) : (i += 1) {
+            const g = text[i .. i + 1]; // slice into underlying file buffer
+            const cell: Cell = .{
+                .char = .{ .grapheme = g, .width = 1 },
+                .style = style,
+            };
+            _ = win.writeCell(@intCast(col), @intCast(row), cell);
+            col += 1;
+        }
     }
 }
