@@ -1,6 +1,7 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
+const vaxis = @import("vaxis");
 
 const TaskIndex = @import("task_index.zig").TaskIndex;
 
