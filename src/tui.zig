@@ -237,11 +237,11 @@ fn handleNavigation(vx: *vaxis.Vaxis, index: *const TaskIndex, ui: *UiState, key
 
     // Down: 'j' or Down arrow
     if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-        ui.moveSelection(todo_len, viewport_height, 1);
+        ui.moveSelection(todo_len, 1);
     }
     // Up: 'k' or Up arrow
     else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-        ui.moveSelection(todo_len, viewport_height, -1);
+        ui.moveSelection(todo_len, -1);
     }
 }
 
@@ -861,9 +861,18 @@ fn recomputeScrollOffsetForSelection(
 
 /// Render TODO list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
-fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_active: bool) void {
+fn drawTodoList(
+    win: vaxis.Window,
+    index: *const TaskIndex,
+    ui: *UiState,
+    cmd_active: bool,
+) void {
     const tasks = index.todo;
-    if (tasks.len == 0) return;
+    if (tasks.len == 0) {
+        ui.scroll_offset = 0;
+        ui.selected_index = 0;
+        return;
+    }
 
     const term_height: usize = @intCast(win.height);
     const term_width: usize = @intCast(win.width);
@@ -875,7 +884,17 @@ fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_ac
     const viewport_height = term_height - LIST_START_ROW - reserved_rows;
     if (viewport_height == 0) return;
 
-    ui.ensureValidSelection(tasks.len, viewport_height);
+    if (ui.selected_index >= tasks.len) {
+        ui.selected_index = tasks.len - 1;
+    }
+
+    // Content starts at column 2: "> " then text.
+    if (term_width <= 2) return;
+    const content_width: usize = term_width - 2;
+
+    // Compute scroll_offset so that the selected task is fully visible
+    // and we pack as many tasks above it as possible.
+    recomputeScrollOffsetForSelection(ui, tasks, viewport_height, content_width);
 
     const indicator_slice = ">"[0..1];
     const space_slice = " "[0..1];
@@ -885,10 +904,6 @@ fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_ac
         .bold = true,
         .fg = .{ .rgb = .{ 220, 220, 255 } },
     };
-
-    // Content starts at column 2: "> " then text.
-    if (term_width <= 2) return;
-    const content_width: usize = term_width - 2;
 
     var row: usize = LIST_START_ROW;
     var remaining_rows: usize = viewport_height;
@@ -901,7 +916,6 @@ fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_ac
         const selected = (ui.focus == .todo and ui.selected_index == idx);
         const style = if (selected) sel_style else base_style;
 
-        // Rows required to render this task fully with wrapping.
         const rows_needed = measureWrappedRows(text, content_width);
         if (rows_needed == 0) continue;
 
@@ -932,10 +946,10 @@ fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_ac
         // Draw wrapped text starting at this row and column 2.
         drawWrappedText(
             win,
-            row,
-            2,
-            rows_needed,
-            content_width,
+            row,           // start_row
+            2,             // col_offset ("  " prefix)
+            rows_needed,   // max_rows allowed for this task
+            content_width, // max_cols
             text,
             style,
         );
