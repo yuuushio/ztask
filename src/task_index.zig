@@ -45,6 +45,22 @@ pub const TaskIndex = struct {
         };
     }
 
+    /// Reload from the underlying files.
+    /// Note: this is O(file_size) and re-parses everything.
+    /// For very large files we can later replace this with an
+    /// incremental append path that only parses the new tail.
+    pub fn reload(
+        self: *TaskIndex,
+        allocator: mem.Allocator,
+        todo_file: fs.File,
+        done_file: fs.File,
+    ) !void {
+        var fresh = try TaskIndex.load(allocator, todo_file, done_file);
+        // Only drop old buffers after we have a fresh index.
+        self.deinit(allocator);
+        self.* = fresh;
+    }
+
     pub fn deinit(self: *TaskIndex, allocator: mem.Allocator) void {
         allocator.free(self.todo_buf);
         allocator.free(self.done_buf);
