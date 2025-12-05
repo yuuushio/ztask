@@ -225,23 +225,27 @@ pub fn run(
 }
 
 
-
 fn handleNavigation(vx: *vaxis.Vaxis, index: *const TaskIndex, ui: *UiState, key: vaxis.Key) void {
     const win = vx.window();
     const term_height: usize = @intCast(win.height);
     if (term_height <= LIST_START_ROW) return;
 
     const viewport_height = term_height - LIST_START_ROW;
-    const todo_len = index.todo.len;
-    if (todo_len == 0 or viewport_height == 0) return;
+
+    const active_len: usize = switch (ui.focus) {
+        .todo => index.todo.len,
+        .done => index.done.len,
+    };
+
+    if (active_len == 0 or viewport_height == 0) return;
 
     // Down: 'j' or Down arrow
     if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-        ui.moveSelection(todo_len, 1);
+        ui.moveSelection(active_len, 1);
     }
     // Up: 'k' or Up arrow
     else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-        ui.moveSelection(todo_len, -1);
+        ui.moveSelection(active_len, -1);
     }
 }
 
