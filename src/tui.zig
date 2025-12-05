@@ -225,6 +225,56 @@ pub fn run(
 }
 
 
+fn switchFocus(ui: *UiState, index: *const TaskIndex, target: ListKind) void {
+    if (ui.focus == target) return;
+    ui.focus = target;
+
+    const len = switch (target) {
+        .todo => index.todo.len,
+        .done => index.done.len,
+    };
+
+    if (len == 0) {
+        ui.selected_index = 0;
+        ui.scroll_offset = 0;
+        ui.last_move = 0;
+        return;
+    }
+
+    if (ui.selected_index >= len) {
+        ui.selected_index = len - 1;
+    }
+
+    ui.scroll_offset = 0;
+    ui.last_move = 0;
+}
+
+fn handleListFocusKey(
+    key: vaxis.Key,
+    ui: *UiState,
+    index: *const TaskIndex,
+) bool {
+    // Tab toggles between TODO and DONE.
+    if (key.matches('\t', .{})) {
+        const next_focus: ListKind = if (ui.focus == .todo) .done else .todo;
+        switchFocus(ui, index, next_focus);
+        return true;
+    }
+
+    // 'H' forces TODO, 'L' forces DONE.
+    if (key.matches('H', .{})) {
+        switchFocus(ui, index, .todo);
+        return true;
+    }
+    if (key.matches('L', .{})) {
+        switchFocus(ui, index, .done);
+        return true;
+    }
+
+    return false;
+}
+
+
 fn handleNavigation(vx: *vaxis.Vaxis, index: *const TaskIndex, ui: *UiState, key: vaxis.Key) void {
     const win = vx.window();
     const term_height: usize = @intCast(win.height);
