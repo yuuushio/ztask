@@ -127,8 +127,15 @@ pub fn run(
 
     try vx.enterAltScreen(tty.writer());
     defer {
-        _ = vx.exitAltScreen(tty.writer()) catch {};
-        _ = vx.resetState(tty.writer()) catch {};
+        var w = tty.writer();
+
+        // Leave alt screen and reset vaxis state
+        _ = vx.exitAltScreen(w) catch {};
+        _ = vx.resetState(w) catch {};
+
+        // Force-disable Kitty keyboard protocol so later programs
+        // (fzf, shells, tmux panes) see normal keycodes again.
+        _ = w.writeAll("\x1b[>0u") catch {};
     }
 
     try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
