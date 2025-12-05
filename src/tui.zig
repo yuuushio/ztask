@@ -255,6 +255,46 @@ fn drawListCommandLine(win: vaxis.Window, active: bool, new_flag: bool) void {
     }
 }
 
+fn drawEditorPlaceholder(win: vaxis.Window) void {
+    const title = "NEW TASK";
+    const hint = "editor placeholder - Esc returns to list";
+
+    const term_width: usize = @intCast(win.width);
+    const term_height: usize = @intCast(win.height);
+    if (term_width == 0 or term_height == 0) return;
+
+    const mid_row: u16 = @intCast(term_height / 2);
+    const hint_row: u16 = mid_row + 2;
+
+    const title_style: vaxis.Style = .{ .bold = true };
+    const hint_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 180, 180, 180 } } };
+
+    drawCenteredText(win, mid_row, title, title_style);
+    drawCenteredText(win, hint_row, hint, hint_style);
+}
+
+fn drawCenteredText(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.Style) void {
+    const term_width: usize = @intCast(win.width);
+    const len = text.len;
+
+    var start_col: usize = 0;
+    if (term_width > len) {
+        start_col = (term_width - len) / 2;
+    }
+
+    var col = start_col;
+    var i: usize = 0;
+    while (i < len and col < term_width) : (i += 1) {
+        const g = text[i .. i + 1];
+        const cell: Cell = .{
+            .char = .{ .grapheme = g, .width = 1 },
+            .style = style,
+        };
+        _ = win.writeCell(@intCast(col), row, cell);
+        col += 1;
+    }
+}
+
 /// Render TODO list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
 fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState) void {
