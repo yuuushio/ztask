@@ -393,7 +393,7 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
     // hints at bottom row
     if (term_height > 6) {
         const hint = "i: insert  Esc: normal/quit  Ctrl-S: save (stub)";
-        const hint_row: u16 = term_height - 1;
+        const hint_row: u16 = @intCast(term_height - 1);
         const hint_style: vaxis.Style = .{
             .fg = .{ .rgb = .{ 150, 150, 150 } },
         };
@@ -463,6 +463,89 @@ fn handleListCommandKey(
 }
 
 
+fn keyToAscii(key: vaxis.Key) ?u8 {
+    // brute-force map key events to ASCII 0x20..0x7e using only .matches
+    var c: u8 = 32; // space
+    while (true) {
+        const cp: u21 = @intCast(c);
+        if (key.matches(cp, .{})) {
+            return c;
+        }
+        if (c == 126) break;
+        c += 1;
+    }
+    return null;
+}
+
+fn handleEditorKey(
+    key: vaxis.Key,
+    view: *AppView,
+    editor: *EditorState,
+) void {
+    // Esc: insert -> normal, normal -> leave editor.
+    if (key.matches(vaxis.Key.escape, .{})) {
+        switch (editor.mode) {
+            .insert => editor.mode = .normal,
+            .normal => view.* = .list,
+        }
+        return;
+    }
+
+    // Ctrl-S: stub "save" – for now just exit editor.
+    if (key.matches('s', .{ .ctrl = true })) {
+        view.* = .list;
+        return;
+    }
+
+    switch (editor.mode) {
+        .normal => {
+            // basic vim-like motions on a single line
+            if (key.matches('i', .{})) {
+                editor.mode = .insert;
+                return;
+            }
+            if (key.matches('a', .{})) {
+                editor.moveToEnd();
+                editor.mode = .insert;
+                return;
+            }
+            if (key.matches('h', .{})) {
+                editor.moveCursor(-1);
+                return;
+            }
+            if (key.matches('l', .{})) {
+                editor.moveCursor(1);
+                return;
+            }
+            if (key.matches('0', .{})) {
+                editor.moveToStart();
+                return;
+            }
+            if (key.matches('$', .{})) {
+                editor.moveToEnd();
+                return;
+            }
+        },
+        .insert => {
+            // Backspace deletes
+            if (key.matches(vaxis.Key.backspace, .{})) {
+                editor.deleteBeforeCursor();
+                return;
+            }
+
+            // Enter: leave insert, stay in editor
+            if (key.matches(vaxis.Key.enter, .{})) {
+                editor.mode = .normal;
+                return;
+            }
+
+            // Printable ASCII
+            if (keyToAscii(key)) |ch| {
+                editor.insertChar(ch);
+            }
+        },
+    }
+}
 
 /// Render TODO list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
