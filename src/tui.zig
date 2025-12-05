@@ -791,14 +791,6 @@ fn drawWrappedText(
             }
         }
 
-        // Trim leading spaces from the segment we are about to draw.
-        while (line_end > line_start and isSpaceByte(text[line_start])) {
-            // advance line_start, but we cannot modify it directly
-            // so we rebuild the slice below.
-            // We keep this trim in the drawing loop for clarity.
-            @breakpoint(); // never hit; we do trimming differently below
-        }
-
         // Compute final slice for this row, trimming left spaces.
         var seg_start = line_start;
         while (seg_start < line_end and isSpaceByte(text[seg_start])) {
@@ -826,7 +818,7 @@ fn drawWrappedText(
 
 /// Render TODO list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
-fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_active:bool) void {
+fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_active: bool) void {
     const tasks = index.todo;
     if (tasks.len == 0) return;
 
@@ -834,9 +826,7 @@ fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_ac
     const term_width: usize = @intCast(win.width);
     if (term_height <= LIST_START_ROW) return;
 
-
     const reserved_rows: usize = if (cmd_active and term_height > LIST_START_ROW + 1) 1 else 0;
-
     if (term_height <= LIST_START_ROW + reserved_rows) return;
 
     const viewport_height = term_height - LIST_START_ROW - reserved_rows;
@@ -853,52 +843,61 @@ fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_ac
         .fg = .{ .rgb = .{ 220, 220, 255 } },
     };
 
-    const max_visible = ui.scroll_offset + viewport_height;
-    const end_index = if (max_visible < tasks.len) max_visible else tasks.len;
+    // Content starts at column 2: "> " then text.
+    if (term_width <= 2) return;
+    const content_width: usize = term_width - 2;
 
-    var row = LIST_START_ROW;
+    var row: usize = LIST_START_ROW;
+    var remaining_rows: usize = viewport_height;
+
     var idx = ui.scroll_offset;
-
-    while (idx < end_index and row < term_height) : ({
-        idx += 1;
-        row += 1;
-    }) {
+    while (idx < tasks.len and remaining_rows > 0 and row < term_height) : (idx += 1) {
         const task = tasks[idx];
         const text = task.text;
 
         const selected = (ui.focus == .todo and ui.selected_index == idx);
         const style = if (selected) sel_style else base_style;
 
-        // Column 0: indicator for selected line (">") or a space.
+        // Rows required to render this task fully with wrapping.
+        const rows_needed = measureWrappedRows(text, content_width);
+        if (rows_needed == 0) continue;
+
+        if (rows_needed > remaining_rows) {
+            // Do not draw a partially visible task; leave the rest blank.
+            break;
+        }
+
+        const row_u16: u16 = @intCast(row);
+
+        // First visual row: draw indicator in column 0, space in column 1.
         if (term_width > 0) {
             const g = if (selected) indicator_slice else space_slice;
             const cell: Cell = .{
                 .char = .{ .grapheme = g, .width = 1 },
                 .style = style,
             };
-            _ = win.writeCell(0, @intCast(row), cell);
+            _ = win.writeCell(0, row_u16, cell);
         }
-
-        // Column 1: space after indicator (for readability).
         if (term_width > 1) {
             const cell: Cell = .{
                 .char = .{ .grapheme = space_slice, .width = 1 },
                 .style = style,
             };
-            _ = win.writeCell(1, @intCast(row), cell);
+            _ = win.writeCell(1, row_u16, cell);
         }
 
-        // Text starts at column 2.
-        var col: usize = 2;
-        var i: usize = 0;
-        while (i < text.len and col < term_width) : (i += 1) {
-            const g = text[i .. i + 1]; // slice into the file-backed buffer
-            const cell: Cell = .{
-                .char = .{ .grapheme = g, .width = 1 },
-                .style = style,
-            };
-            _ = win.writeCell(@intCast(col), @intCast(row), cell);
-            col += 1;
-        }
+        // Draw wrapped text starting at this row and column 2.
+        drawWrappedText(
+            win,
+            row,
+            rows_needed,
+            2,
+            content_width,
+            text,
+            style,
+        );
+
+        row += rows_needed;
+        remaining_rows -= rows_needed;
     }
 }
