@@ -688,6 +688,142 @@ fn handleEditorKey(
     }
 }
 
+
+fn isSpaceByte(b: u8) bool {
+    return b == ' ' or b == '\t';
+}
+
+/// Measure how many terminal rows are needed to render `text`
+/// given a maximum of `max_cols` columns per row, using
+/// simple word-aware wrapping on ASCII spaces/tabs.
+///
+/// Assumes each byte has width 1.
+fn measureWrappedRows(text: []const u8, max_cols: usize) usize {
+    if (text.len == 0 or max_cols == 0) return 0;
+
+    var rows: usize = 0;
+    var i: usize = 0;
+    const len = text.len;
+
+    while (i < len) {
+        rows += 1;
+
+        const line_start = i;
+        var line_width: usize = 0;
+        var last_break: ?usize = null;
+
+        while (i < len and line_width < max_cols) : ({
+            i += 1;
+            line_width += 1;
+        }) {
+            const b = text[i];
+            if (isSpaceByte(b)) {
+                // next candidate word starts after this space
+                last_break = i + 1;
+            }
+        }
+
+        if (i < len and line_width == max_cols) {
+            // We wrapped because we ran out of columns and there is more text.
+            if (last_break) |lb| {
+                if (lb > line_start and lb <= len) {
+                    // roll back to the byte after the last break
+                    i = lb;
+                }
+            }
+        }
+
+        // Skip leading spaces at the start of the next line.
+        while (i < len and isSpaceByte(text[i])) {
+            i += 1;
+        }
+    }
+
+    return rows;
+}
+
+/// Draw `text` starting at (start_row, col_offset), wrapping by whole
+/// words into at most `max_rows` rows and `max_cols` columns.
+fn drawWrappedText(
+    win: vaxis.Window,
+    start_row: usize,
+    col_offset: usize,
+    max_rows: usize,
+    max_cols: usize,
+    text: []const u8,
+    style: vaxis.Style,
+) void {
+    if (text.len == 0 or max_rows == 0 or max_cols == 0) return;
+
+    const len = text.len;
+    var i: usize = 0;
+    var row_index: usize = 0;
+
+    while (i < len and row_index < max_rows and (start_row + row_index) < win.height) : (row_index += 1) {
+        const row: u16 = @intCast(start_row + row_index);
+        var col: u16 = @intCast(col_offset);
+        var used_cols: usize = 0;
+
+        const line_start = i;
+        var last_break: ?usize = null;
+
+        // Determine how many bytes fit on this row.
+        while (i < len and used_cols < max_cols and col < win.width) : ({
+            i += 1;
+            used_cols += 1;
+            col += 1;
+        }) {
+            const b = text[i];
+            if (isSpaceByte(b)) {
+                last_break = i + 1;
+            }
+        }
+
+        var line_end = i;
+
+        if (i < len and used_cols == max_cols) {
+            // We wrapped early and still have more text.
+            if (last_break) |lb| {
+                if (lb > line_start and lb <= len) {
+                    line_end = lb;
+                    i = lb;
+                }
+            }
+        }
+
+        // Trim leading spaces from the segment we are about to draw.
+        while (line_end > line_start and isSpaceByte(text[line_start])) {
+            // advance line_start, but we cannot modify it directly
+            // so we rebuild the slice below.
+            // We keep this trim in the drawing loop for clarity.
+            @breakpoint(); // never hit; we do trimming differently below
+        }
+
+        // Compute final slice for this row, trimming left spaces.
+        var seg_start = line_start;
+        while (seg_start < line_end and isSpaceByte(text[seg_start])) {
+            seg_start += 1;
+        }
+
+        var j: usize = seg_start;
+        var draw_col: u16 = @intCast(col_offset);
+        while (j < line_end and draw_col < win.width) : (j += 1) {
+            const g = text[j .. j + 1];
+            const cell: Cell = .{
+                .char = .{ .grapheme = g, .width = 1 },
+                .style = style,
+            };
+            _ = win.writeCell(draw_col, row, cell);
+            draw_col += 1;
+        }
+
+        // Skip leading spaces for the next visual line.
+        while (i < len and isSpaceByte(text[i])) {
+            i += 1;
+        }
+    }
+}
+
 /// Render TODO list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
 fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_active:bool) void {
