@@ -33,8 +33,7 @@ pub const UiState = struct {
     pub fn moveSelection(
         self: *UiState,
         list_len: usize,
-        viewport_height: usize,
-        delta: isize,
+        delta: i32,
     ) void {
         if (list_len == 0) {
             self.selected_index = 0;
@@ -42,25 +41,16 @@ pub const UiState = struct {
             return;
         }
 
-        if (delta == 0) {
-            self.ensureValidSelection(list_len, viewport_height);
-            return;
-        }
+        const max_index: i32 = @intCast(list_len - 1);
+        var idx: i32 = @intCast(self.selected_index);
+        idx += delta;
 
-        var new_index: isize = @intCast(self.selected_index);
-        new_index += delta;
+        if (idx < 0) idx = 0;
+        if (idx > max_index) idx = max_index;
 
-        if (new_index < 0) {
-            new_index = 0;
-        } else {
-            const last: isize = @intCast(list_len - 1);
-            if (new_index > last) {
-                new_index = last;
-            }
-        }
-
-        self.selected_index = @intCast(new_index);
-        self.ensureValidSelection(list_len, viewport_height);
+        self.selected_index = @intCast(idx);
+        // scrolling is handled in drawTodoList based on wrapping;
+        // do not modify scroll_offset here.
     }
 
     pub fn ensureValidSelection(
