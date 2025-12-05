@@ -140,6 +140,7 @@ pub fn run(
 
     var list_cmd_active = false;
     var list_cmd_new = false;
+    var list_cmd_done = false;
 
 
     var loop: vaxis.Loop(Event) = .{
@@ -177,19 +178,27 @@ pub fn run(
                 } else switch (view) {
                     .list => {
                         if (list_cmd_active) {
-                            handleListCommandKey(
+                            try handleListCommandKey(
                                 key,
                                 &view,
                                 &editor,
                                 &list_cmd_active,
                                 &list_cmd_new,
+                                &list_cmd_done,
+                                ctx,
+                                allocator,
+                                ui,
                             );
                         } else {
                             if (key.matches(':', .{})) {
                                 // Start list-view ":" command-line
                                 list_cmd_active = true;
                                 list_cmd_new = false;
-                            } else {
+                                list_cmd_done = false;
+                            } else if (handleListFocusKey(key, ui, ctx.index)) {
+
+                            }
+                            else {
                                 // Normal list navigation (j/k, arrows, etc.)
                                 handleNavigation(&vx, ctx.index, ui, key);
                             }
@@ -211,7 +220,7 @@ pub fn run(
         switch (view) {
             .list => {
                 drawHeader(win);
-                drawCounts(win, ctx.index);
+                drawCounts(win, ctx.index, ui);
                 drawTodoList(win, ctx.index, ui, list_cmd_active);
                 drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done);
             },
@@ -376,9 +385,6 @@ fn drawCounts(win: vaxis.Window, index: *const TaskIndex, ui: *const UiState) vo
         .fg = .{ .rgb = .{ 230, 230, 255 } },
     };
 
-    // "TODO {todo}  DONE {done}"
-    const todo_prefix_len: usize = "TODO ".len;
-
     // Find the double-space delimiter between TODO and DONE segments.
     var delim_index: usize = text_len;
     var k: usize = 0;
@@ -416,7 +422,7 @@ fn drawCounts(win: vaxis.Window, index: *const TaskIndex, ui: *const UiState) vo
     }
 }
 
-fn drawListCommandLine(win: vaxis.Window, active: bool, new_flag: bool) void {
+fn drawListCommandLine(win: vaxis.Window, active: bool, new_flag: bool, done_flag: bool) void {
     if (!active or win.height == 0) return;
 
     const row: u16 = win.height - 1;
@@ -428,10 +434,17 @@ fn drawListCommandLine(win: vaxis.Window, active: bool, new_flag: bool) void {
         .style = style,
     });
 
-    if (new_flag and win.width > 1) {
-        const n_slice = "n"[0..1];
+    if (win.width > 1) {
+        const ch = if (new_flag)
+            "n"
+        else if (done_flag)
+            "d"
+        else
+            " ";
+
+        const ch_slice = ch[0..1];
         _ = win.writeCell(1, row, .{
-            .char = .{ .grapheme = n_slice, .width = 1 },
+            .char = .{ .grapheme = ch_slice, .width = 1 },
             .style = style,
         });
     }
@@ -572,35 +585,52 @@ fn handleListCommandKey(
     editor: *EditorState,
     list_cmd_active: *bool,
     list_cmd_new: *bool,
-) void {
+    list_cmd_done: *bool,
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    ui: *UiState,
+) !void {
     // Esc: cancel command-line
     if (key.matches(vaxis.Key.escape, .{})) {
         list_cmd_active.* = false;
         list_cmd_new.* = false;
+        list_cmd_done.* = false;
         return;
     }
 
-    // Backspace: clear the "n" if present
+    // Backspace: clear any single-letter command
     if (key.matches(vaxis.Key.backspace, .{})) {
         list_cmd_new.* = false;
+        list_cmd_done.* = false;
         return;
     }
 
-    // Enter: execute
+    // Enter: execute the command
     if (key.matches(vaxis.Key.enter, .{})) {
         if (list_cmd_new.*) {
-            // ":n" -> open editor
+            // ":n" -> open editor for new TODO task
             editor.* = EditorState.init();
             view.* = .editor;
+        } else if (list_cmd_done.*) {
+            // ":d" -> mark current TODO task as DONE
+            try markDone(ctx, allocator, ui);
         }
         list_cmd_active.* = false;
         list_cmd_new.* = false;
+        list_cmd_done.* = false;
         return;
     }
 
-    // For now we only support ":n"
+    // For now we only support single-letter ":n" and ":d"
     if (key.matches('n', .{})) {
         list_cmd_new.* = true;
+        list_cmd_done.* = false;
+        return;
+    }
+    if (key.matches('d', .{})) {
+        list_cmd_done.* = true;
+        list_cmd_new.* = false;
+        return;
     }
 }
 
@@ -643,7 +673,7 @@ fn markDone(
     while (i < todos.len) : (i += 1) {
         if (i == remove_index) continue;
         const src = todos[i].text;
-        std.mem.copy(u8, buf[pos .. pos + src.len], src);
+        @memcpy(buf[pos .. pos + src.len], src);
         pos += src.len;
         buf[pos] = '\n';
         pos += 1;
