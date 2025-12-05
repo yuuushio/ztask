@@ -24,13 +24,74 @@ const AppView = enum {
     editor,
 };
 
-const EditorState = struct {
-    pub const Mode = enum { normal };
 
-    mode: Mode = .normal,
+const EditorState = struct {
+    pub const Mode = enum {
+        normal,
+        insert,
+    };
+
+    mode: Mode = .insert,
+
+    // single-line task text buffer
+    buf: [512]u8 = undefined,
+    len: usize = 0,
+    cursor: usize = 0,
 
     pub fn init() EditorState {
-        return .{};
+        return .{
+            .mode = .insert,
+            .len = 0,
+            .cursor = 0,
+        };
+    }
+
+    pub fn asSlice(self: *const EditorState) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn insertChar(self: *EditorState, ch: u8) void {
+        if (self.len >= self.buf.len) return;
+
+        if (self.cursor > self.len) self.cursor = self.len;
+
+        var i: usize = self.len;
+        while (i > self.cursor) : (i -= 1) {
+            self.buf[i] = self.buf[i - 1];
+        }
+        self.buf[self.cursor] = ch;
+        self.len += 1;
+        self.cursor += 1;
+    }
+
+    pub fn deleteBeforeCursor(self: *EditorState) void {
+        if (self.cursor == 0 or self.len == 0) return;
+
+        var i: usize = self.cursor - 1;
+        while (i + 1 < self.len) : (i += 1) {
+            self.buf[i] = self.buf[i + 1];
+        }
+        self.len -= 1;
+        self.cursor -= 1;
+    }
+
+    pub fn moveCursor(self: *EditorState, delta: i32) void {
+        const cur = @as(i32, @intCast(self.cursor));
+        var next = cur + delta;
+
+        if (next < 0) next = 0;
+        const max = @as(i32, @intCast(self.len));
+        if (next > max) next = max;
+
+        self.cursor = @intCast(next);
+    }
+
+    pub fn moveToStart(self: *EditorState) void {
+        self.cursor = 0;
+    }
+
+    pub fn moveToEnd(self: *EditorState) void {
+        self.cursor = self.len;
     }
 };
 
@@ -103,7 +164,7 @@ pub fn run(
                         }
                     },
                     .editor => {
-                        handleEditorKey(key, &view);
+                        handleEditorKey(key, &view, &editor);
                     },
                 }
             },
@@ -123,7 +184,7 @@ pub fn run(
                 drawListCommandLine(win, list_cmd_active, list_cmd_new);
             },
             .editor => {
-                drawEditorPlaceholder(win);
+                drawEditorView(win, &editor);
             },
         }
 
@@ -259,22 +320,85 @@ fn drawListCommandLine(win: vaxis.Window, active: bool, new_flag: bool) void {
     }
 }
 
-fn drawEditorPlaceholder(win: vaxis.Window) void {
-    const title = "NEW TASK";
-    const hint = "editor placeholder - Esc returns to list";
 
+fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
     const term_width: usize = @intCast(win.width);
     const term_height: usize = @intCast(win.height);
     if (term_width == 0 or term_height == 0) return;
 
-    const mid_row: u16 = @intCast(term_height / 2);
-    const hint_row: u16 = mid_row + 2;
+    const header = "NEW TASK";
+    const mode_insert = "[INSERT]";
+    const mode_normal = "[NORMAL]";
 
-    const title_style: vaxis.Style = .{ .bold = true };
-    const hint_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 180, 180, 180 } } };
+    const header_style: vaxis.Style = .{ .bold = true };
+    drawCenteredText(win, 0, header, header_style);
 
-    drawCenteredText(win, mid_row, title, title_style);
-    drawCenteredText(win, hint_row, hint, hint_style);
+    const mode_text = if (editor.mode == .insert) mode_insert else mode_normal;
+    const mode_style: vaxis.Style = .{
+        .fg = .{ .rgb = .{ 180, 180, 180 } },
+    };
+
+    // mode indicator at row 1, left-aligned
+    var col: u16 = 0;
+    var i: usize = 0;
+    while (i < mode_text.len and col < win.width) : (i += 1) {
+        const g = mode_text[i .. i + 1];
+        _ = win.writeCell(col, 1, .{
+            .char = .{ .grapheme = g, .width = 1 },
+            .style = mode_style,
+        });
+        col += 1;
+    }
+
+    // label "Task:" at row 3
+    const label = "Task:";
+    const label_row: u16 = if (term_height > 3) 3 else 1;
+    col = 2;
+    i = 0;
+    const label_style: vaxis.Style = .{};
+    while (i < label.len and col < win.width) : (i += 1) {
+        const g = label[i .. i + 1];
+        _ = win.writeCell(col, label_row, .{
+            .char = .{ .grapheme = g, .width = 1 },
+            .style = label_style,
+        });
+        col += 1;
+    }
+
+    // task text at row 4
+    const text_row: u16 = if (term_height > 4) 4 else label_row + 1;
+    const text = editor.asSlice();
+    const text_style: vaxis.Style = .{};
+
+    var text_col: u16 = 2;
+    i = 0;
+    while (i < text.len and text_col < win.width) : (i += 1) {
+        const g = text[i .. i + 1];
+        _ = win.writeCell(text_col, text_row, .{
+            .char = .{ .grapheme = g, .width = 1 },
+            .style = text_style,
+        });
+        text_col += 1;
+    }
+
+    // simple cursor indicator: underscore after current cursor position
+    if (editor.mode == .insert and text_col < win.width) {
+        const cursor = "_"[0..1];
+        _ = win.writeCell(text_col, text_row, .{
+            .char = .{ .grapheme = cursor, .width = 1 },
+            .style = text_style,
+        });
+    }
+
+    // hints at bottom row
+    if (term_height > 6) {
+        const hint = "i: insert  Esc: normal/quit  Ctrl-S: save (stub)";
+        const hint_row: u16 = term_height - 1;
+        const hint_style: vaxis.Style = .{
+            .fg = .{ .rgb = .{ 150, 150, 150 } },
+        };
+        drawCenteredText(win, hint_row, hint, hint_style);
+    }
 }
 
 fn drawCenteredText(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.Style) void {
@@ -338,12 +462,7 @@ fn handleListCommandKey(
     }
 }
 
-fn handleEditorKey(key: vaxis.Key, view: *AppView) void {
-    // Esc from editor returns to list view, discarding edits for now.
-    if (key.matches(vaxis.Key.escape, .{})) {
-        view.* = .list;
-    }
-}
+
 
 /// Render TODO list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
