@@ -1,7 +1,8 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
-
 const Cell = vaxis.Cell;
+
+const fs = std.fs;
 
 var counts_buf: [64]u8 = undefined;
 
@@ -19,10 +20,17 @@ const Event = union(enum) {
 };
 
 
+pub const TuiContext = struct {
+    todo_file: *fs.File,
+    done_file: *fs.File,
+    index: *TaskIndex,
+};
+
 const AppView = enum {
     list,
     editor,
 };
+
 
 
 const EditorState = struct {
@@ -33,16 +41,23 @@ const EditorState = struct {
 
     mode: Mode = .insert,
 
-    // single-line task text buffer
+    // main single-line task text
     buf: [512]u8 = undefined,
     len: usize = 0,
     cursor: usize = 0,
+
+    // ":" command-line inside the editor, e.g. "w", "q", "wq"
+    cmd_active: bool = false,
+    cmd_buf: [32]u8 = undefined,
+    cmd_len: usize = 0,
 
     pub fn init() EditorState {
         return .{
             .mode = .insert,
             .len = 0,
             .cursor = 0,
+            .cmd_active = false,
+            .cmd_len = 0,
         };
     }
 
@@ -50,9 +65,17 @@ const EditorState = struct {
         return self.buf[0..self.len];
     }
 
+    pub fn cmdSlice(self: *const EditorState) []const u8 {
+        return self.cmd_buf[0..self.cmd_len];
+    }
+
+    pub fn resetCommand(self: *EditorState) void {
+        self.cmd_active = false;
+        self.cmd_len = 0;
+    }
+
     pub fn insertChar(self: *EditorState, ch: u8) void {
         if (self.len >= self.buf.len) return;
-
         if (self.cursor > self.len) self.cursor = self.len;
 
         var i: usize = self.len;
@@ -100,7 +123,7 @@ const LIST_START_ROW: usize = 4;
 
 pub fn run(
     allocator: std.mem.Allocator,
-    index: *const TaskIndex,
+    ctx: *TuiContext,
     ui: *UiState,
 ) !void {
     var buffer: [1024]u8 = undefined;
@@ -166,12 +189,12 @@ pub fn run(
                                 list_cmd_new = false;
                             } else {
                                 // Normal list navigation (j/k, arrows, etc.)
-                                handleNavigation(&vx, index, ui, key);
+                                handleNavigation(&vx, ctx.index, ui, key);
                             }
                         }
                     },
                     .editor => {
-                        handleEditorKey(key, &view, &editor);
+                        handleEditorKey(key, &view, &editor, ctx, allocator,ui);
                     },
                 }
             },
@@ -186,8 +209,8 @@ pub fn run(
         switch (view) {
             .list => {
                 drawHeader(win);
-                drawCounts(win, index);
-                drawTodoList(win, index, ui, list_cmd_active);
+                drawCounts(win, ctx.index);
+                drawTodoList(win, ctx.index, ui, list_cmd_active);
                 drawListCommandLine(win, list_cmd_active, list_cmd_new);
             },
             .editor => {
