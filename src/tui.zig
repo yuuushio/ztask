@@ -213,7 +213,7 @@ pub fn run(
                 drawHeader(win);
                 drawCounts(win, ctx.index);
                 drawTodoList(win, ctx.index, ui, list_cmd_active);
-                drawListCommandLine(win, list_cmd_active, list_cmd_new);
+                drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done);
             },
             .editor => {
                 drawEditorView(win, &editor);
@@ -296,11 +296,12 @@ fn drawHeader(win: vaxis.Window) void {
 }
 
 
-fn drawCounts(win: vaxis.Window, index: *const TaskIndex) void {
-    // Format into the static buffer so grapheme slices stay valid
+
+fn drawCounts(win: vaxis.Window, index: *const TaskIndex, ui: *const UiState) void {
+    // Format into the static buffer.
     const text = std.fmt.bufPrint(
         &counts_buf,
-        "TODO: {d}  DONE: {d}",
+        "TODO {d}  DONE {d}",
         .{ index.todo.len, index.done.len },
     ) catch counts_buf[0..0];
 
@@ -313,15 +314,45 @@ fn drawCounts(win: vaxis.Window, index: *const TaskIndex) void {
         start_col = (term_width - text_len) / 2;
     }
 
-    const style: vaxis.Style = .{
+    const style_inactive: vaxis.Style = .{
         .fg = .{ .rgb = .{ 180, 180, 180 } },
     };
+    const style_active: vaxis.Style = .{
+        .bold = true,
+        .fg = .{ .rgb = .{ 230, 230, 255 } },
+    };
+
+    // "TODO {todo}  DONE {done}"
+    const todo_prefix_len: usize = "TODO ".len;
+
+    // Find the double-space delimiter between TODO and DONE segments.
+    var delim_index: usize = text_len;
+    var k: usize = 0;
+    while (k + 1 < text_len) : (k += 1) {
+        if (text[k] == ' ' and text[k + 1] == ' ') {
+            delim_index = k;
+            break;
+        }
+    }
+
+    const todo_end = if (delim_index <= text_len) delim_index else text_len;
+    const done_start = if (delim_index + 2 <= text_len) delim_index + 2 else text_len;
+
+    const focus_todo = (ui.focus == .todo);
 
     var col = start_col;
     var i: usize = 0;
     while (i < text_len and col < term_width) : (i += 1) {
-        // Grapheme slices point into counts_buf, which is static
         const g = text[i .. i + 1];
+
+        const style =
+            if (i < todo_end)
+                (if (focus_todo) style_active else style_inactive)
+            else if (i >= done_start)
+                (if (!focus_todo) style_active else style_inactive)
+            else
+                style_inactive;
+
         const cell: Cell = .{
             .char = .{ .grapheme = g, .width = 1 },
             .style = style,
