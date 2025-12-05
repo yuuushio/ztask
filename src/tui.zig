@@ -9,6 +9,8 @@ var counts_buf: [64]u8 = undefined;
 const task_mod = @import("task_index.zig");
 const TaskIndex = task_mod.TaskIndex;
 
+const Task = task_mod.Task;
+
 const ui_mod = @import("ui_state.zig");
 const UiState = ui_mod.UiState;
 const ListKind = ui_mod.ListKind;
@@ -806,6 +808,54 @@ fn drawWrappedText(
             i += 1;
         }
     }
+}
+
+
+fn recomputeScrollOffsetForSelection(
+    ui: *UiState,
+    tasks: []const Task,
+    viewport_height: usize,
+    content_width: usize,
+) void {
+    if (tasks.len == 0 or viewport_height == 0 or content_width == 0) {
+        ui.scroll_offset = 0;
+        ui.selected_index = 0;
+        return;
+    }
+
+    if (ui.selected_index >= tasks.len) {
+        ui.selected_index = tasks.len - 1;
+    }
+
+    const sel = ui.selected_index;
+
+    // Rows needed for the selected task itself.
+    var rows_sel = measureWrappedRows(tasks[sel].text, content_width);
+    if (rows_sel == 0) rows_sel = 1;
+
+    if (rows_sel > viewport_height) {
+        // Pathological: single task is taller than viewport.
+        // We cannot show it fully; anchor viewport at this task.
+        ui.scroll_offset = sel;
+        return;
+    }
+
+    var rows_total: usize = rows_sel;
+    var start_idx: usize = sel;
+
+    // Walk backwards, adding tasks above, until we fill the viewport.
+    while (start_idx > 0) {
+        const prev_idx = start_idx - 1;
+        var r = measureWrappedRows(tasks[prev_idx].text, content_width);
+        if (r == 0) r = 1;
+
+        if (rows_total + r > viewport_height) break;
+
+        rows_total += r;
+        start_idx = prev_idx;
+    }
+
+    ui.scroll_offset = start_idx;
 }
 
 
