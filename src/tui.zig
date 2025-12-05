@@ -16,6 +16,22 @@ const Event = union(enum) {
     winsize: vaxis.Winsize,
 };
 
+
+const AppView = enum {
+    list,
+    editor,
+};
+
+const EditorState = struct {
+    pub const Mode = enum { normal };
+
+    mode: Mode = .normal,
+
+    pub fn init() EditorState {
+        return .{};
+    }
+};
+
 /// First row used for the task list (0 = header, 2 = counts, 3 blank).
 const LIST_START_ROW: usize = 4;
 
@@ -30,6 +46,13 @@ pub fn run(
 
     var vx = try vaxis.init(allocator, .{});
     defer vx.deinit(allocator, tty.writer());
+
+    var view: AppView = .list;
+    var editor = EditorState.init();
+
+    var list_cmd_active = false;
+    var list_cmd_new = false;
+
 
     var loop: vaxis.Loop(Event) = .{
         .tty = &tty,
