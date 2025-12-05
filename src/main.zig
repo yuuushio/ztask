@@ -90,7 +90,13 @@ pub fn main() !void {
     var app = try App.init(allocator);
     defer app.deinit(allocator);
 
+    var ctx = tui.TuiContext{
+        .todo_file = &app.todo,
+        .done_file = &app.done,
+        .index= &app.index,
+    };
+
     var ui = UiState.init();
 
-    try tui.run(allocator, &app.index, &ui);
+    try tui.run(allocator, &ctx, &ui);
 }
