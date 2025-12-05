@@ -563,23 +563,78 @@ fn keyToAscii(key: vaxis.Key) ?u8 {
     return null;
 }
 
+
 fn handleEditorKey(
     key: vaxis.Key,
     view: *AppView,
     editor: *EditorState,
-) void {
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    ui: *UiState,
+) !void {
+    // If ":" command-line is active, all keys go there.
+    if (editor.cmd_active) {
+        // Esc: cancel command-line
+        if (key.matches(vaxis.Key.escape, .{})) {
+            editor.resetCommand();
+            return;
+        }
+
+        // Backspace: delete last command char
+        if (key.matches(vaxis.Key.backspace, .{})) {
+            if (editor.cmd_len > 0) editor.cmd_len -= 1;
+            return;
+        }
+
+        // Enter: execute
+        if (key.matches(vaxis.Key.enter, .{})) {
+            const cmd = editor.cmdSlice();
+
+            // :q -> exit editor without saving
+            if (std.mem.eql(u8, cmd, "q")) {
+                editor.resetCommand();
+                view.* = .list;
+                return;
+            }
+
+            // :w or :wq -> save and exit
+            if (std.mem.eql(u8, cmd, "w") or std.mem.eql(u8, cmd, "wq")) {
+                try saveNewTask(ctx, allocator, editor, ui);
+                editor.resetCommand();
+                view.* = .list;
+                return;
+            }
+
+            // Unknown command: just clear for now.
+            editor.resetCommand();
+            return;
+        }
+
+        // Printable ASCII into command buffer
+        if (keyToAscii(key)) |ch| {
+            if (editor.cmd_len < editor.cmd_buf.len) {
+                editor.cmd_buf[editor.cmd_len] = ch;
+                editor.cmd_len += 1;
+            }
+        }
+
+        return;
+    }
+
+    // ":" enters editor command-line (from any mode, forces normal).
+    if (key.matches(':', .{})) {
+        editor.mode = .normal;
+        editor.resetCommand();
+        editor.cmd_active = true;
+        return;
+    }
+
     // Esc: insert -> normal, normal -> leave editor.
     if (key.matches(vaxis.Key.escape, .{})) {
         switch (editor.mode) {
             .insert => editor.mode = .normal,
             .normal => view.* = .list,
         }
-        return;
-    }
-
-    // Ctrl-S: stub "save" – for now just exit editor.
-    if (key.matches('s', .{ .ctrl = true })) {
-        view.* = .list;
         return;
     }
 
