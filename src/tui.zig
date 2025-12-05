@@ -546,6 +546,7 @@ fn saveNewTask(
     if (ctx.index.todo.len != 0) {
         ui.focus = .todo;
         ui.selected_index = ctx.index.todo.len - 1;
+        ui.last_move = 1;
         // scroll_offset will be normalized in drawTodoList via ensureValidSelection
     }
 }
@@ -811,11 +812,47 @@ fn drawWrappedText(
 }
 
 
+fn isSelectionFullyVisible(
+    ui: *const UiState,
+    tasks: []const Task,
+    viewport_height: usize,
+    content_width: usize,
+) bool {
+    if (tasks.len == 0 or viewport_height == 0 or content_width == 0) return true;
+    if (ui.selected_index >= tasks.len) return false;
+    if (ui.scroll_offset >= tasks.len) return false;
+
+    var rows_used: usize = 0;
+    var idx = ui.scroll_offset;
+
+    while (idx < tasks.len and rows_used < viewport_height) : (idx += 1) {
+        var rows = measureWrappedRows(tasks[idx].text, content_width);
+        if (rows == 0) rows = 1;
+
+        if (rows_used + rows > viewport_height) {
+            // This task would be partially clipped.
+            if (idx == ui.selected_index) return false;
+            break;
+        }
+
+        if (idx == ui.selected_index) {
+            // Selected task fits entirely within [rows_used .. rows_used+rows).
+            return true;
+        }
+
+        rows_used += rows;
+    }
+
+    return false;
+}
+
+
 fn recomputeScrollOffsetForSelection(
     ui: *UiState,
     tasks: []const Task,
     viewport_height: usize,
     content_width: usize,
+    dir: i8,
 ) void {
     if (tasks.len == 0 or viewport_height == 0 or content_width == 0) {
         ui.scroll_offset = 0;
@@ -829,21 +866,26 @@ fn recomputeScrollOffsetForSelection(
 
     const sel = ui.selected_index;
 
-    // Rows needed for the selected task itself.
     var rows_sel = measureWrappedRows(tasks[sel].text, content_width);
     if (rows_sel == 0) rows_sel = 1;
 
     if (rows_sel > viewport_height) {
-        // Pathological: single task is taller than viewport.
-        // We cannot show it fully; anchor viewport at this task.
+        // Pathological: one task taller than the viewport; anchor on it.
         ui.scroll_offset = sel;
         return;
     }
 
+    // Moving up: make the selected task the first in the viewport.
+    if (dir < 0) {
+        ui.scroll_offset = sel;
+        return;
+    }
+
+    // Moving down or unknown: keep behaviour where we pack as many
+    // tasks above the selection as will fit.
     var rows_total: usize = rows_sel;
     var start_idx: usize = sel;
 
-    // Walk backwards, adding tasks above, until we fill the viewport.
     while (start_idx > 0) {
         const prev_idx = start_idx - 1;
         var r = measureWrappedRows(tasks[prev_idx].text, content_width);
@@ -888,13 +930,18 @@ fn drawTodoList(
         ui.selected_index = tasks.len - 1;
     }
 
+    const dir= ui.last_move;
+
     // Content starts at column 2: "> " then text.
     if (term_width <= 2) return;
     const content_width: usize = term_width - 2;
 
-    // Compute scroll_offset so that the selected task is fully visible
-    // and we pack as many tasks above it as possible.
-    recomputeScrollOffsetForSelection(ui, tasks, viewport_height, content_width);
+    // Only adjust scroll_offset if the selected task is not fully visible
+    // with the current offset. This avoids jitter when moving inside the
+    // existing viewport.
+    if (!isSelectionFullyVisible(ui, tasks, viewport_height, content_width)) {
+        recomputeScrollOffsetForSelection(ui, tasks, viewport_height, content_width, dir);
+    }
 
     const indicator_slice = ">"[0..1];
     const space_slice = " "[0..1];

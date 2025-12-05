@@ -13,6 +13,8 @@ pub const UiState = struct {
     /// First visible row in the focused list.
     scroll_offset: usize = 0,
 
+    last_move: i8 = 0,
+
     pub fn init() UiState {
         return UiState{};
     }
@@ -49,8 +51,14 @@ pub const UiState = struct {
         if (idx > max_index) idx = max_index;
 
         self.selected_index = @intCast(idx);
+
+        if (delta > 0) {
+            self.last_move = 1;
+        } else if (delta < 0) {
+            self.last_move = -1;
+        }
+
         // scrolling is handled in drawTodoList based on wrapping;
-        // do not modify scroll_offset here.
     }
 
     pub fn ensureValidSelection(
