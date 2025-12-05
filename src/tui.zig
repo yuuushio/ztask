@@ -117,7 +117,7 @@ pub fn run(
             .list => {
                 drawHeader(win);
                 drawCounts(win, index);
-                drawTodoList(win, index, ui);
+                drawTodoList(win, index, ui, list_cmd_active);
                 drawListCommandLine(win, list_cmd_active, list_cmd_new);
             },
             .editor => {
@@ -343,7 +343,7 @@ fn handleEditorKey(key: vaxis.Key, view: *AppView) void {
 
 /// Render TODO list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
-fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState) void {
+fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState, cmd_active:bool) void {
     const tasks = index.todo;
     if (tasks.len == 0) return;
 
@@ -351,7 +351,14 @@ fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState) void {
     const term_width: usize = @intCast(win.width);
     if (term_height <= LIST_START_ROW) return;
 
-    const viewport_height = term_height - LIST_START_ROW;
+
+    const reserved_rows: usize = if (cmd_active and term_height > LIST_START_ROW + 1) 1 else 0;
+
+    if (term_height <= LIST_START_ROW + reserved_rows) return;
+
+    const viewport_height = term_height - LIST_START_ROW - reserved_rows;
+    if (viewport_height == 0) return;
+
     ui.ensureValidSelection(tasks.len, viewport_height);
 
     const indicator_slice = ">"[0..1];
