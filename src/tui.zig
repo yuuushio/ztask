@@ -605,6 +605,82 @@ fn handleListCommandKey(
 }
 
 
+fn markDone(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    ui: *UiState,
+) !void {
+    // Only meaningful in TODO view.
+    if (ui.focus != .todo) return;
+
+    const todos = ctx.index.todo;
+    if (todos.len == 0) return;
+    if (ui.selected_index >= todos.len) return;
+
+    const remove_index = ui.selected_index;
+    const line = todos[remove_index].text;
+
+    // Append the task line to done.txt
+    var done_file = ctx.done_file.*;
+    const done_stat = try done_file.stat();
+    try done_file.seekTo(done_stat.size);
+    try done_file.writeAll(line);
+    try done_file.writeAll("\n");
+
+    // Compute total size of new todo.txt (all lines except the removed one).
+    var total_len: usize = 0;
+    var i: usize = 0;
+    while (i < todos.len) : (i += 1) {
+        if (i == remove_index) continue;
+        total_len += todos[i].text.len + 1; // + '\n'
+    }
+
+    const buf = try allocator.alloc(u8, total_len);
+    defer allocator.free(buf);
+
+    var pos: usize = 0;
+    i = 0;
+    while (i < todos.len) : (i += 1) {
+        if (i == remove_index) continue;
+        const src = todos[i].text;
+        std.mem.copy(u8, buf[pos .. pos + src.len], src);
+        pos += src.len;
+        buf[pos] = '\n';
+        pos += 1;
+    }
+
+    var todo_file = ctx.todo_file.*;
+    try todo_file.seekTo(0);
+    if (buf.len > 0) {
+        try todo_file.writeAll(buf);
+        try todo_file.setEndPos(@intCast(buf.len));
+    } else {
+        // No tasks left; truncate to zero.
+        try todo_file.setEndPos(0);
+    }
+
+    // Reload index from disk.
+    // NOTE: This is an O(file_size) rewrite+reload for each :d.
+    // For very large files and many state changes the optimal design
+    // is to maintain append-only logs and an in-memory "live set" of
+    // task indices, and only occasionally rewrite compacted files.
+    try ctx.index.reload(allocator, todo_file, done_file);
+
+    // Adjust UI to remain in TODO list near where we were.
+    ui.focus = .todo;
+    const new_len = ctx.index.todo.len;
+    if (new_len == 0) {
+        ui.selected_index = 0;
+        ui.scroll_offset = 0;
+    } else if (remove_index >= new_len) {
+        ui.selected_index = new_len - 1;
+    } else {
+        ui.selected_index = remove_index;
+    }
+    ui.last_move = -1;
+}
+
+
 fn saveNewTask(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
