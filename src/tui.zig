@@ -295,6 +295,52 @@ fn drawCenteredText(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.
     }
 }
 
+
+fn handleListCommandKey(
+    key: vaxis.Key,
+    view: *AppView,
+    editor: *EditorState,
+    list_cmd_active: *bool,
+    list_cmd_new: *bool,
+) void {
+    // Esc: cancel command-line
+    if (key.matches(vaxis.Key.escape, .{})) {
+        list_cmd_active.* = false;
+        list_cmd_new.* = false;
+        return;
+    }
+
+    // Backspace: clear the "n" if present
+    if (key.matches(vaxis.Key.backspace, .{})) {
+        list_cmd_new.* = false;
+        return;
+    }
+
+    // Enter: execute
+    if (key.matches(vaxis.Key.enter, .{})) {
+        if (list_cmd_new.*) {
+            // ":n" -> open editor
+            editor.* = EditorState.init();
+            view.* = .editor;
+        }
+        list_cmd_active.* = false;
+        list_cmd_new.* = false;
+        return;
+    }
+
+    // For now we only support ":n"
+    if (key.matches('n', .{})) {
+        list_cmd_new.* = true;
+    }
+}
+
+fn handleEditorKey(key: vaxis.Key, view: *AppView) void {
+    // Esc from editor returns to list view, discarding edits for now.
+    if (key.matches(vaxis.Key.escape, .{})) {
+        view.* = .list;
+    }
+}
+
 /// Render TODO list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
 fn drawTodoList(win: vaxis.Window, index: *const TaskIndex, ui: *UiState) void {
