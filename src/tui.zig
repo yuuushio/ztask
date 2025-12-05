@@ -518,6 +518,37 @@ fn handleListCommandKey(
 }
 
 
+fn saveNewTask(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    editor: *EditorState,
+    ui: *UiState,
+) !void {
+    const line = editor.asSlice();
+    if (line.len == 0) return; // ignore empty tasks
+
+    // Append to todo.txt
+    var file = ctx.todo_file.*; // copy; shares the same OS handle
+    const stat = try file.stat();
+    try file.seekTo(stat.size);
+    try file.writeAll(line);
+    try file.writeAll("\n");
+
+    // Reload index from disk.
+    // NOTE: this is O(file_size). For very large files we can later
+    // replace this with an incremental path that parses only the newly
+    // appended bytes and updates the index in place.
+    try ctx.index.reload(allocator, file, ctx.done_file.*);
+
+    // Focus new task at bottom of TODO list.
+    if (ctx.index.todo.len != 0) {
+        ui.focus = .todo;
+        ui.selected_index = ctx.index.todo.len - 1;
+        // scroll_offset will be normalized in drawTodoList via ensureValidSelection
+    }
+}
+
+
 fn keyToAscii(key: vaxis.Key) ?u8 {
     // brute-force map key events to ASCII 0x20..0x7e using only .matches
     var c: u8 = 32; // space
