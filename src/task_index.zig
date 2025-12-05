@@ -55,7 +55,7 @@ pub const TaskIndex = struct {
         todo_file: fs.File,
         done_file: fs.File,
     ) !void {
-        var fresh = try TaskIndex.load(allocator, todo_file, done_file);
+        const fresh = try TaskIndex.load(allocator, todo_file, done_file);
         // Only drop old buffers after we have a fresh index.
         self.deinit(allocator);
         self.* = fresh;

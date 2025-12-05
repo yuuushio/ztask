@@ -194,7 +194,7 @@ pub fn run(
                         }
                     },
                     .editor => {
-                        handleEditorKey(key, &view, &editor, ctx, allocator,ui);
+                        try handleEditorKey(key, &view, &editor, ctx, allocator,ui);
                     },
                 }
             },
