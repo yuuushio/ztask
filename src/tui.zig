@@ -420,14 +420,39 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         });
     }
 
-    // hints at bottom row
-    if (term_height > 6) {
-        const hint = "i: insert  Esc: normal/quit  Ctrl-S: save (stub)";
+    // hints at bottom row (only when not in ":" command mode)
+    if (term_height > 6 and !editor.cmd_active) {
+        const hint = "i: insert   :w save+quit   :q quit";
         const hint_row: u16 = @intCast(term_height - 1);
         const hint_style: vaxis.Style = .{
             .fg = .{ .rgb = .{ 150, 150, 150 } },
         };
         drawCenteredText(win, hint_row, hint, hint_style);
+    }
+
+
+    // editor ":" command-line at the bottom when active
+    if (editor.cmd_active and term_height > 0) {
+        const row: u16 = @intCast(term_height - 1);
+        const style: vaxis.Style = .{};
+
+        const colon = ":"[0..1];
+        _ = win.writeCell(0, row, .{
+            .char = .{ .grapheme = colon, .width = 1 },
+            .style = style,
+        });
+
+        const cmd = editor.cmdSlice();
+        var col2: u16 = 1;
+        var j: usize = 0;
+        while (j < cmd.len and col2 < win.width) : (j += 1) {
+            const g = cmd[j .. j + 1];
+            _ = win.writeCell(col2, row, .{
+                .char = .{ .grapheme = g, .width = 1 },
+                .style = style,
+            });
+            col2 += 1;
+        }
     }
 }
 
