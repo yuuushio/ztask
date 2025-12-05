@@ -76,10 +76,33 @@ pub fn run(
 
         switch (event) {
             .key_press => |key| {
-                if (key.matches('c', .{ .ctrl = true }) or key.matches('q', .{})) {
+                // Ctrl-C always exits the whole app.
+                if (key.matches('c', .{ .ctrl = true })) {
                     running = false;
-                } else {
-                    handleNavigation(&vx, index, ui, key);
+                } else switch (view) {
+                    .list => {
+                        if (list_cmd_active) {
+                            handleListCommandKey(
+                                key,
+                                &view,
+                                &editor,
+                                &list_cmd_active,
+                                &list_cmd_new,
+                            );
+                        } else {
+                            if (key.matches(':', .{})) {
+                                // Start list-view ":" command-line
+                                list_cmd_active = true;
+                                list_cmd_new = false;
+                            } else {
+                                // Normal list navigation (j/k, arrows, etc.)
+                                handleNavigation(&vx, index, ui, key);
+                            }
+                        }
+                    },
+                    .editor => {
+                        handleEditorKey(key, &view);
+                    },
                 }
             },
             .winsize => |ws| {
