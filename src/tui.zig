@@ -986,7 +986,7 @@ fn recomputeScrollOffsetForSelection(
 }
 
 
-/// Render TODO list with vim-style navigation.
+/// Render the currently focused list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
 fn drawTodoList(
     win: vaxis.Window,
@@ -994,7 +994,10 @@ fn drawTodoList(
     ui: *UiState,
     cmd_active: bool,
 ) void {
-    const tasks = index.todo;
+    const tasks: []const Task = switch (ui.focus) {
+        .todo => index.todo,
+        .done => index.done,
+    };
     if (tasks.len == 0) {
         ui.scroll_offset = 0;
         ui.selected_index = 0;
@@ -1015,11 +1018,11 @@ fn drawTodoList(
         ui.selected_index = tasks.len - 1;
     }
 
-    const dir= ui.last_move;
-
     // Content starts at column 2: "> " then text.
     if (term_width <= 2) return;
     const content_width: usize = term_width - 2;
+
+    const dir = ui.last_move;
 
     // Only adjust scroll_offset if the selected task is not fully visible
     // with the current offset. This avoids jitter when moving inside the
@@ -1045,7 +1048,7 @@ fn drawTodoList(
         const task = tasks[idx];
         const text = task.text;
 
-        const selected = (ui.focus == .todo and ui.selected_index == idx);
+        const selected = (ui.selected_index == idx);
         const style = if (selected) sel_style else base_style;
 
         const rows_needed = measureWrappedRows(text, content_width);
@@ -1078,10 +1081,10 @@ fn drawTodoList(
         // Draw wrapped text starting at this row and column 2.
         drawWrappedText(
             win,
-            row,           // start_row
-            2,             // col_offset ("  " prefix)
-            rows_needed,   // max_rows allowed for this task
-            content_width, // max_cols
+            row,           
+            2,            
+            rows_needed, 
+            content_width,
             text,
             style,
         );
