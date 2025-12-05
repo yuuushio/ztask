@@ -111,15 +111,25 @@ pub fn run(
         }
 
         const win = vx.window();
+        clearAll(win);
 
-        clearAll(win);          // wipe our working area deterministically
-        drawHeader(win);
-        drawCounts(win, index);
-        drawTodoList(win, index, ui);
+        switch (view) {
+            .list => {
+                drawHeader(win);
+                drawCounts(win, index);
+                drawTodoList(win, index, ui);
+                drawListCommandLine(win, list_cmd_active, list_cmd_new);
+            },
+            .editor => {
+                drawEditorPlaceholder(win);
+            },
+        }
 
         try vx.render(tty.writer());
     }
 }
+
+
 
 fn handleNavigation(vx: *vaxis.Vaxis, index: *const TaskIndex, ui: *UiState, key: vaxis.Key) void {
     const win = vx.window();
@@ -221,6 +231,27 @@ fn drawCounts(win: vaxis.Window, index: *const TaskIndex) void {
         };
         _ = win.writeCell(@intCast(col), row, cell);
         col += 1;
+    }
+}
+
+fn drawListCommandLine(win: vaxis.Window, active: bool, new_flag: bool) void {
+    if (!active or win.height == 0) return;
+
+    const row: u16 = win.height - 1;
+    const style: vaxis.Style = .{};
+
+    const colon = ":"[0..1];
+    _ = win.writeCell(0, row, .{
+        .char = .{ .grapheme = colon, .width = 1 },
+        .style = style,
+    });
+
+    if (new_flag and win.width > 1) {
+        const n_slice = "n"[0..1];
+        _ = win.writeCell(1, row, .{
+            .char = .{ .grapheme = n_slice, .width = 1 },
+            .style = style,
+        });
     }
 }
 
