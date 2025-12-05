@@ -3,6 +3,8 @@ const vaxis = @import("vaxis");
 
 const Cell = vaxis.Cell;
 
+var counts_buf: [64]u8 = undefined;
+
 const task_mod = @import("task_index.zig");
 const TaskIndex = task_mod.TaskIndex;
 
@@ -200,13 +202,14 @@ fn drawHeader(win: vaxis.Window) void {
     }
 }
 
+
 fn drawCounts(win: vaxis.Window, index: *const TaskIndex) void {
-    var buf: [64]u8 = undefined;
+    // Format into the static buffer so grapheme slices stay valid
     const text = std.fmt.bufPrint(
-        &buf,
+        &counts_buf,
         "TODO: {d}  DONE: {d}",
         .{ index.todo.len, index.done.len },
-    ) catch buf[0..0];
+    ) catch counts_buf[0..0];
 
     const term_width: usize = @intCast(win.width);
     const row: u16 = if (win.height > 2) 2 else 0;
@@ -224,7 +227,8 @@ fn drawCounts(win: vaxis.Window, index: *const TaskIndex) void {
     var col = start_col;
     var i: usize = 0;
     while (i < text_len and col < term_width) : (i += 1) {
-        const g = text[i .. i + 1]; // slice into `buf`
+        // Grapheme slices point into counts_buf, which is static
+        const g = text[i .. i + 1];
         const cell: Cell = .{
             .char = .{ .grapheme = g, .width = 1 },
             .style = style,
