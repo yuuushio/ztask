@@ -654,20 +654,22 @@ fn markDone(
     if (todo_view.selected_index >= todos.len) return;
 
     const remove_index = todo_view.selected_index;
-    const task = todos[remove_index];
+    const original = todos[remove_index];
 
-    // Append task to done.txt as JSON-lines.
+    // Copy the task but mark it as done.
+    var moved = original;
+    moved.status = .done;
+
+    // Append to done file.
     var done_file = ctx.done_file.*;
-    try store.appendJsonTaskLine(allocator, &done_file, task);
+    try store.appendJsonTaskLine(allocator, &done_file, moved);
 
-    // Rewrite todo.txt without the removed task.
+    // Rewrite todo file without that index (unchanged from your current code).
     var todo_file = ctx.todo_file.*;
     try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, todos, remove_index);
 
-    // Reload index from disk.
     try ctx.index.reload(allocator, todo_file, done_file);
 
-    // Adjust UI to remain in TODO list near where we were.
     ui.focus = .todo;
     const new_len = ctx.index.todo.len;
     if (new_len == 0) {
