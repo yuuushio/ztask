@@ -154,78 +154,109 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
     };
 }
 
-/// Append a single task line to a file in JSON-lines format:
-///   {"text":"..."}\n
-pub fn appendJsonTaskLine(
-    allocator: mem.Allocator,
-    file: *fs.File,
-    text: []const u8,
-) !void {
-    const stat = try file.stat();
-    try file.seekTo(stat.size);
-    try writeJsonLineForText(allocator, file, text);
-}
 
-/// Rewrite entire file in JSON-lines format using `tasks`,
-/// optionally skipping the element at `skip_index` (used by :d).
-///
-/// NOTE: this rewrites the entire file on each mutation.
-/// For very large files and many state changes the optimal design
-/// is to maintain append-only logs and an in-memory “live set” of
-/// task indices, and only occasionally rewrite compacted files.
-pub fn rewriteJsonFileWithoutIndex(
-    allocator: mem.Allocator,
-    file: *fs.File,
-    tasks: []const Task,
-    skip_index: usize,
-) !void {
-    try file.seekTo(0);
-    try file.setEndPos(0);
-
-    var i: usize = 0;
-    while (i < tasks.len) : (i += 1) {
-        if (i == skip_index) continue;
-        try writeJsonLineForText(allocator, file, tasks[i].text);
-    }
-}
-
-// ----------------- internal helpers -----------------
-
-fn parseTextFromJsonLine(
-    line: []const u8,
-    text_buf: []u8,
-    cursor: *usize,
-) ParseError![]const u8 {
+fn parsePriorityField(line: []const u8) u8 {
+    const key = "\"prio\"";
     const len = line.len;
-    if (len == 0) return text_buf[cursor.* .. cursor.*];
+    if (len == 0) return 0;
 
-    // Search for "text" key at top level.
     var i: usize = 0;
     var key_pos: ?usize = null;
-    while (i + 6 <= len) : (i += 1) {
-        if (line[i] == '"' and
-            line[i + 1] == 't' and
-            line[i + 2] == 'e' and
-            line[i + 3] == 'x' and
-            line[i + 4] == 't' and
-            line[i + 5] == '"')
-        {
+    while (i + key.len <= len) : (i += 1) {
+        var ok = true;
+        var j: usize = 0;
+        while (j < key.len) : (j += 1) {
+            if (line[i + j] != key[j]) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
             key_pos = i;
             break;
         }
     }
-    if (key_pos == null) return ParseError.InvalidJson;
+    if (key_pos == null) return 0;
 
-    i = key_pos.? + 6;
+    i = key_pos.? + key.len;
+
+    // Find ':'
+    while (i < len and line[i] != ':') : (i += 1) {}
+    if (i == len) return 0;
+    i += 1;
+
+    while (i < len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    if (i == len) return 0;
+
+    var value: u16 = 0;
+    var saw_digit = false;
+    while (i < len) {
+        const b = line[i];
+        if (b < '0' or b > '9') break;
+        saw_digit = true;
+        const digit: u16 = b - '0';
+        value = value * 10 + digit;
+        if (value > 255) return 0;
+        i += 1;
+    }
+    if (!saw_digit) return 0;
+
+    return @intCast(value);
+}
+
+fn parseStringField(
+    line: []const u8,
+    key: []const u8,
+    required: bool,
+    text_buf: []u8,
+    cursor: *usize,
+) ParseError![]const u8 {
+    const len = line.len;
+    if (len == 0) {
+        if (required) return ParseError.InvalidJson;
+        return text_buf[cursor.*..cursor.*];
+    }
+
+    // Look for "key"
+    const quoted_len = key.len + 2;
+    var i: usize = 0;
+    var key_pos: ?usize = null;
+    while (i + quoted_len <= len) : (i += 1) {
+        if (line[i] != '"') continue;
+
+        var ok = true;
+        var j: usize = 0;
+        while (j < key.len) : (j += 1) {
+            if (line[i + 1 + j] != key[j]) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) continue;
+
+        if (line[i + 1 + key.len] != '"') continue;
+
+        key_pos = i;
+        break;
+    }
+
+    if (key_pos == null) {
+        if (required) return ParseError.InvalidJson;
+        return text_buf[cursor.*..cursor.*];
+    }
+
+    i = key_pos.? + quoted_len;
 
     // Find ':'
     while (i < len and line[i] != ':') : (i += 1) {}
     if (i == len) return ParseError.InvalidJson;
     i += 1;
 
-    // Skip spaces.
+    // Skip spaces
     while (i < len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
-    if (i == len or line[i] != '"') return ParseError.InvalidJson;
+    if (i == len) return ParseError.InvalidJson;
+
+    if (line[i] != '"') return ParseError.InvalidJson;
     i += 1; // at start of string
 
     const dst_start = cursor.*;
@@ -262,6 +293,63 @@ fn parseTextFromJsonLine(
     cursor.* = dst;
     return slice;
 }
+
+
+fn parseTaskFromJsonLine(
+    line: []const u8,
+    text_buf: []u8,
+    cursor: *usize,
+) ParseError!Task {
+    const text_slice = try parseStringField(line, "text", true, text_buf, cursor);
+    const prio = parsePriorityField(line);
+    const due_slice = try parseStringField(line, "due", false, text_buf, cursor);
+    const repeat_slice = try parseStringField(line, "repeat", false, text_buf, cursor);
+
+    return Task{
+        .text = text_slice,
+        .prio = prio,
+        .due = due_slice,
+        .repeat = repeat_slice,
+    };
+}
+
+/// Append a single task line to a file in JSON-lines format:
+///   {"text":"..."}\n
+pub fn appendJsonTaskLine(
+    allocator: mem.Allocator,
+    file: *fs.File,
+    text: []const u8,
+) !void {
+    const stat = try file.stat();
+    try file.seekTo(stat.size);
+    try writeJsonLineForText(allocator, file, text);
+}
+
+/// Rewrite entire file in JSON-lines format using `tasks`,
+/// optionally skipping the element at `skip_index` (used by :d).
+///
+/// NOTE: this rewrites the entire file on each mutation.
+/// For very large files and many state changes the optimal design
+/// is to maintain append-only logs and an in-memory “live set” of
+/// task indices, and only occasionally rewrite compacted files.
+pub fn rewriteJsonFileWithoutIndex(
+    allocator: mem.Allocator,
+    file: *fs.File,
+    tasks: []const Task,
+    skip_index: usize,
+) !void {
+    try file.seekTo(0);
+    try file.setEndPos(0);
+
+    var i: usize = 0;
+    while (i < tasks.len) : (i += 1) {
+        if (i == skip_index) continue;
+        try writeJsonLineForText(allocator, file, tasks[i].text);
+    }
+}
+
+// internal helpers 
+
 
 fn copyPlainLine(
     line: []const u8,
