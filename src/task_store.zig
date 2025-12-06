@@ -3,7 +3,17 @@ const fs = std.fs;
 const mem = std.mem;
 
 pub const Task = struct {
+    /// Original task string as entered by the user.
     text: []const u8,
+
+    /// Priority 0..255. 0 means "no explicit priority".
+    prio: u8,
+
+    /// Due date as a small string, e.g. "2025-05-12" or "" if none.
+    due: []const u8,
+
+    /// Repeat spec as a small string, e.g. "1w", "30d", "" if none.
+    repeat: []const u8,
 };
 
 pub const FileImage = struct {
@@ -95,14 +105,21 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
     while (i < raw_slice.len) : (i += 1) {
         if (raw_slice[i] == '\n') {
             const line = raw_slice[line_start..i];
-            const text_slice = if (line.len == 0)
-                text_buf[text_cursor..text_cursor]
-            else if (is_json)
-                try parseTextFromJsonLine(line, text_buf, &text_cursor)
-            else
-                copyPlainLine(line, text_buf, &text_cursor);
 
-            tasks[task_index] = .{ .text = text_slice };
+            if (is_json) {
+                const task = try parseTaskFromJsonLine(line, text_buf, &text_cursor);
+                tasks[task_index] = task;
+            } else {
+                const text_slice = copyPlainLine(line, text_buf, &text_cursor);
+                const empty = text_buf[text_cursor..text_cursor];
+                tasks[task_index] = .{
+                    .text = text_slice,
+                    .prio = 0,
+                    .due = empty,
+                    .repeat = empty,
+                };
+            }
+
             task_index += 1;
             line_start = i + 1;
         }
@@ -110,14 +127,21 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
 
     if (line_start < raw_slice.len) {
         const line = raw_slice[line_start..raw_slice.len];
-        const text_slice = if (line.len == 0)
-            text_buf[text_cursor..text_cursor]
-        else if (is_json)
-            try parseTextFromJsonLine(line, text_buf, &text_cursor)
-        else
-            copyPlainLine(line, text_buf, &text_cursor);
 
-        tasks[task_index] = .{ .text = text_slice };
+        if (is_json) {
+            const task = try parseTaskFromJsonLine(line, text_buf, &text_cursor);
+            tasks[task_index] = task;
+        } else {
+            const text_slice = copyPlainLine(line, text_buf, &text_cursor);
+            const empty = text_buf[text_cursor..text_cursor];
+            tasks[task_index] = .{
+                .text = text_slice,
+                .prio = 0,
+                .due = empty,
+                .repeat = empty,
+            };
+        }
+
         task_index += 1;
     }
 
@@ -126,7 +150,7 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
 
     return FileImage{
         .tasks = tasks[0..task_index],
-        .text_buf = text_buf,
+        .text_buf = text_buf, // keep full capacity; we free the full slice
     };
 }
 
