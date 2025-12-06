@@ -354,9 +354,82 @@ pub fn appendJsonTaskLine(
     file: *fs.File,
     task: Task,
 ) !void {
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+
+    var w = buf.writer();
+
+    // We keep field order fixed for cheap parsing.
+    try w.writeAll("{\"id\":");
+    try w.print("{d}", .{task.id});
+    try w.writeAll(",\"text\":");
+    try writeJsonString(&w, task.text);
+
+    // projects array – currently empty, but we serialize an empty [] to
+    // lock in the schema.
+    try w.writeAll(",\"projects\":[");
+    // TODO later: emit actual project strings using spans.
+    try w.writeAll("]");
+
+    // contexts array – same story.
+    try w.writeAll(",\"contexts\":[");
+    // TODO later: emit actual context strings.
+    try w.writeAll("]");
+
+    try w.writeAll(",\"priority\":");
+    try w.print("{d}", .{task.priority});
+
+    try w.writeAll(",\"due\":");
+    if (task.due.len == 0) {
+        try w.writeAll("null");
+    } else {
+        try writeJsonString(&w, task.due);
+    }
+
+    try w.writeAll(",\"repeat\":");
+    if (task.repeat.len == 0) {
+        try w.writeAll("null");
+    } else {
+        try writeJsonString(&w, task.repeat);
+    }
+
+    try w.writeAll(",\"created\":");
+    try w.print("{d}", .{task.created_ms});
+
+    try w.writeAll(",\"status\":\"");
+    switch (task.status) {
+        .todo => try w.writeAll("todo"),
+        .ongoing => try w.writeAll("ongoing"),
+        .done => try w.writeAll("done"),
+    }
+    try w.writeAll("\"}\n");
+
     const stat = try file.stat();
     try file.seekTo(stat.size);
-    try writeJsonLineForTask(allocator, file, task);
+    try file.writeAll(buf.items);
+}
+
+
+fn writeJsonString(w: anytype, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |b| {
+        switch (b) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\t' => try w.writeAll("\\t"),
+            '\r' => try w.writeAll("\\r"),
+            else => {
+                if (b < 0x20) {
+                    // Control chars get \u00XX.
+                    try w.print("\\u00{x:0>2}", .{b});
+                } else {
+                    try w.writeByte(b);
+                }
+            },
+        }
+    }
+    try w.writeByte('"');
 }
 
 /// Rewrite entire file in JSON-lines format using `tasks`,
