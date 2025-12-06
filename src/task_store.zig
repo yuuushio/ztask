@@ -1,24 +1,60 @@
 const std = @import("std");
-const fs = std.fs;
 const mem = std.mem;
+const fs = std.fs;
+const time = std.time;
 
-pub const Task = struct {
-    /// Original task string as entered by the user.
-    text: []const u8,
-
-    /// Priority 0..255. 0 means "no explicit priority".
-    prio: u8,
-
-    /// Due date as a small string, e.g. "2025-05-12" or "" if none.
-    due: []const u8,
-
-    /// Repeat spec as a small string, e.g. "1w", "30d", "" if none.
-    repeat: []const u8,
+/// Status of a task on disk and in memory.
+pub const Status = enum {
+    todo,
+    ongoing,
+    done,
 };
 
+/// Span into the shared backing buffer, used for projects/contexts.
+const Span = struct {
+    start: u32,
+    len: u16,
+};
+
+/// Single task, all string slices reference FileImage.buf.
+pub const Task = struct {
+    id: u64,
+
+    /// What user sees and edits.
+    text: []const u8,
+
+    /// Projects and contexts are stored as spans into FileImage.buf.
+    proj_first: u32,
+    proj_count: u16,
+    ctx_first: u32,
+    ctx_count: u16,
+
+    priority: u8,
+    status: Status,
+
+    due: []const u8,     // "" => no due date
+    repeat: []const u8,  // "" => no repeat rule
+
+    /// Unix millis since epoch; used for fast sorting, grouping, etc.
+    created_ms: i64,
+};
+
+/// Loaded view of one file (todo or done).
 pub const FileImage = struct {
-    tasks: []Task,
-    text_buf: []u8,
+    buf: []u8,     // entire file contents (owned)
+    tasks: []Task, // each task’s slices/spans point into buf
+    spans: []Span, // concatenation of all project+context names
+
+    pub fn deinit(self: *FileImage, allocator: mem.Allocator) void {
+        if (self.buf.len != 0) allocator.free(self.buf);
+        if (self.tasks.len != 0) allocator.free(self.tasks);
+        if (self.spans.len != 0) allocator.free(self.spans);
+        self.* = .{
+            .buf = &[_]u8{},
+            .tasks = &[_]Task{},
+            .spans = &[_]Span{},
+        };
+    }
 };
 
 const ParseError = error{

@@ -5,6 +5,8 @@ const mem = std.mem;
 const store = @import("task_store.zig");
 
 pub const Task = store.Task;
+pub const Status = store.Status;
+pub const FileImage = store.FileImage;
 
 pub const TaskIndex = struct {
     todo: []Task,
