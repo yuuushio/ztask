@@ -125,7 +125,7 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
 
     return FileImage{
         .tasks = tasks[0..task_index],
-        .text_buf = text_buf[0..text_cursor],
+        .text_buf = text_buf,
     };
 }
 
