@@ -15,6 +15,8 @@ const ui_mod = @import("ui_state.zig");
 const UiState = ui_mod.UiState;
 const ListKind = ui_mod.ListKind;
 
+const ListView = ui_mod.ListView;
+
 /// Event type for the libvaxis low-level loop.
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -238,24 +240,26 @@ fn switchFocus(ui: *UiState, index: *const TaskIndex, target: ListKind) void {
     if (ui.focus == target) return;
     ui.focus = target;
 
-    const len = switch (target) {
+    var view = ui.activeView();
+
+    const len: usize = switch (target) {
         .todo => index.todo.len,
         .done => index.done.len,
     };
 
     if (len == 0) {
-        ui.selected_index = 0;
-        ui.scroll_offset = 0;
-        ui.last_move = 0;
+        view.selected_index = 0;
+        view.scroll_offset = 0;
+        view.last_move = 0;
         return;
     }
 
-    if (ui.selected_index >= len) {
-        ui.selected_index = len - 1;
+    if (view.selected_index >= len) {
+        view.selected_index = len - 1;
     }
 
-    ui.scroll_offset = 0;
-    ui.last_move = 0;
+    view.scroll_offset = 0;
+    view.last_move = 0;
 }
 
 fn handleListFocusKey(
@@ -635,19 +639,20 @@ fn handleListCommandKey(
 }
 
 
+
 fn markDone(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
     ui: *UiState,
 ) !void {
-    // Only meaningful in TODO view.
-    if (ui.focus != .todo) return;
-
+    // Always operate on the TODO list; DONE is the target.
     const todos = ctx.index.todo;
     if (todos.len == 0) return;
-    if (ui.selected_index >= todos.len) return;
 
-    const remove_index = ui.selected_index;
+    var todo_view = &ui.todo;
+    if (todo_view.selected_index >= todos.len) return;
+
+    const remove_index = todo_view.selected_index;
     const line = todos[remove_index].text;
 
     // Append the task line to done.txt
@@ -698,16 +703,17 @@ fn markDone(
 
     // Adjust UI to remain in TODO list near where we were.
     ui.focus = .todo;
+
     const new_len = ctx.index.todo.len;
     if (new_len == 0) {
-        ui.selected_index = 0;
-        ui.scroll_offset = 0;
+        todo_view.selected_index = 0;
+        todo_view.scroll_offset = 0;
     } else if (remove_index >= new_len) {
-        ui.selected_index = new_len - 1;
+        todo_view.selected_index = new_len - 1;
     } else {
-        ui.selected_index = remove_index;
+        todo_view.selected_index = remove_index;
     }
-    ui.last_move = -1;
+    todo_view.last_move = -1;
 }
 
 
@@ -736,8 +742,9 @@ fn saveNewTask(
     // Focus new task at bottom of TODO list.
     if (ctx.index.todo.len != 0) {
         ui.focus = .todo;
-        ui.selected_index = ctx.index.todo.len - 1;
-        ui.last_move = 1;
+        var todo_view = &ui.todo;
+        todo_view.selected_index = ctx.index.todo.len - 1;
+        todo_view.last_move = 1;
         // scroll_offset will be normalized in drawTodoList via ensureValidSelection
     }
 }
@@ -1004,17 +1011,17 @@ fn drawWrappedText(
 
 
 fn isSelectionFullyVisible(
-    ui: *const UiState,
+    view: *const ListView,
     tasks: []const Task,
     viewport_height: usize,
     content_width: usize,
 ) bool {
     if (tasks.len == 0 or viewport_height == 0 or content_width == 0) return true;
-    if (ui.selected_index >= tasks.len) return false;
-    if (ui.scroll_offset >= tasks.len) return false;
+    if (view.selected_index >= tasks.len) return false;
+    if (view.scroll_offset >= tasks.len) return false;
 
     var rows_used: usize = 0;
-    var idx = ui.scroll_offset;
+    var idx = view.scroll_offset;
 
     while (idx < tasks.len and rows_used < viewport_height) : (idx += 1) {
         var rows = measureWrappedRows(tasks[idx].text, content_width);
@@ -1022,11 +1029,11 @@ fn isSelectionFullyVisible(
 
         if (rows_used + rows > viewport_height) {
             // This task would be partially clipped.
-            if (idx == ui.selected_index) return false;
+            if (idx == view.selected_index) return false;
             break;
         }
 
-        if (idx == ui.selected_index) {
+        if (idx == view.selected_index) {
             // Selected task fits entirely within [rows_used .. rows_used+rows).
             return true;
         }
@@ -1039,36 +1046,36 @@ fn isSelectionFullyVisible(
 
 
 fn recomputeScrollOffsetForSelection(
-    ui: *UiState,
+    view: *ListView,
     tasks: []const Task,
     viewport_height: usize,
     content_width: usize,
     dir: i8,
 ) void {
     if (tasks.len == 0 or viewport_height == 0 or content_width == 0) {
-        ui.scroll_offset = 0;
-        ui.selected_index = 0;
+        view.scroll_offset = 0;
+        view.selected_index = 0;
         return;
     }
 
-    if (ui.selected_index >= tasks.len) {
-        ui.selected_index = tasks.len - 1;
+    if (view.selected_index >= tasks.len) {
+        view.selected_index = tasks.len - 1;
     }
 
-    const sel = ui.selected_index;
+    const sel = view.selected_index;
 
     var rows_sel = measureWrappedRows(tasks[sel].text, content_width);
     if (rows_sel == 0) rows_sel = 1;
 
     if (rows_sel > viewport_height) {
         // Pathological: one task taller than the viewport; anchor on it.
-        ui.scroll_offset = sel;
+        view.scroll_offset = sel;
         return;
     }
 
     // Moving up: make the selected task the first in the viewport.
     if (dir < 0) {
-        ui.scroll_offset = sel;
+        view.scroll_offset = sel;
         return;
     }
 
@@ -1088,7 +1095,7 @@ fn recomputeScrollOffsetForSelection(
         start_idx = prev_idx;
     }
 
-    ui.scroll_offset = start_idx;
+    view.scroll_offset = start_idx;
 }
 
 
@@ -1104,9 +1111,11 @@ fn drawTodoList(
         .todo => index.todo,
         .done => index.done,
     };
+    var view = ui.activeView();
+
     if (tasks.len == 0) {
-        ui.scroll_offset = 0;
-        ui.selected_index = 0;
+        view.selected_index = 0;
+        view.scroll_offset = 0;
         return;
     }
 
@@ -1120,21 +1129,21 @@ fn drawTodoList(
     const viewport_height = term_height - LIST_START_ROW - reserved_rows;
     if (viewport_height == 0) return;
 
-    if (ui.selected_index >= tasks.len) {
-        ui.selected_index = tasks.len - 1;
+    if (view.selected_index >= tasks.len) {
+        view.selected_index = tasks.len - 1;
     }
 
     // Content starts at column 2: "> " then text.
     if (term_width <= 2) return;
     const content_width: usize = term_width - 2;
 
-    const dir = ui.last_move;
+    const dir = view.last_move;
 
     // Only adjust scroll_offset if the selected task is not fully visible
     // with the current offset. This avoids jitter when moving inside the
     // existing viewport.
-    if (!isSelectionFullyVisible(ui, tasks, viewport_height, content_width)) {
-        recomputeScrollOffsetForSelection(ui, tasks, viewport_height, content_width, dir);
+    if (!isSelectionFullyVisible(view, tasks, viewport_height, content_width)) {
+        recomputeScrollOffsetForSelection(view, tasks, viewport_height, content_width, dir);
     }
 
     const indicator_slice = ">"[0..1];
@@ -1149,12 +1158,12 @@ fn drawTodoList(
     var row: usize = LIST_START_ROW;
     var remaining_rows: usize = viewport_height;
 
-    var idx = ui.scroll_offset;
+    var idx = view.scroll_offset;
     while (idx < tasks.len and remaining_rows > 0 and row < term_height) : (idx += 1) {
         const task = tasks[idx];
         const text = task.text;
 
-        const selected = (ui.selected_index == idx);
+        const selected = (view.selected_index == idx);
         const style = if (selected) sel_style else base_style;
 
         const rows_needed = measureWrappedRows(text, content_width);
@@ -1187,9 +1196,9 @@ fn drawTodoList(
         // Draw wrapped text starting at this row and column 2.
         drawWrappedText(
             win,
-            row,           
-            2,            
-            rows_needed, 
+            row,
+            2,
+            rows_needed,
             content_width,
             text,
             style,

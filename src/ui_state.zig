@@ -3,9 +3,17 @@ pub const ListKind = enum {
     done,
 };
 
+pub const ListView = struct {
+    selected_index: usize = 0,
+    scroll_offset: usize = 0,
+    last_move: i8 = 0,
+};
+
 pub const UiState = struct {
     /// Which list is currently focused in the UI.
     focus: ListKind = .todo,
+    todo: ListView = .{},
+    done: ListView = .{},
 
     /// Index of the selected task within the focused list.
     selected_index: usize = 0,
@@ -17,6 +25,20 @@ pub const UiState = struct {
 
     pub fn init() UiState {
         return UiState{};
+    }
+
+    pub fn activeView(self: *UiState) *ListView {
+        return switch (self.focus){
+            .todo => &self.todo,
+            .done => &self.done,
+        };
+    }
+
+    pub fn activeViewConst(self: *const UiState) *const ListView {
+        return switch (self.focus) {
+            .todo => &self.todo,
+            .done => &self.done,
+        };
     }
 
     /// Switch focus between todo/done and keep selection in a valid range.
@@ -37,9 +59,13 @@ pub const UiState = struct {
         list_len: usize,
         delta: i32,
     ) void {
+
+        var view = self.activeView();
+
         if (list_len == 0) {
             self.selected_index = 0;
             self.scroll_offset = 0;
+            view.last_move = 0;
             return;
         }
 
