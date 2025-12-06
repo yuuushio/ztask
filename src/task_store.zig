@@ -30,6 +30,7 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
     var raw = try allocator.alloc(u8, size);
     errdefer allocator.free(raw);
 
+    try file.seekTo(0);
     const got = try file.readAll(raw);
     const raw_slice = raw[0..got];
 
