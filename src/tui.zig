@@ -682,7 +682,6 @@ fn markDone(
 }
 
 
-
 fn saveNewTask(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
@@ -692,19 +691,39 @@ fn saveNewTask(
     const text = editor.asSlice();
     if (text.len == 0) return; // ignore empty tasks
 
-    var file = ctx.todo_file.*; // copy; same OS handle
+    // Compute next id cheaply: scan existing todo/done once and keep max.
+    // This is O(n) but only on :w from editor, not on every redraw.
+    var max_id: u64 = 0;
+    for (ctx.index.todo) |t| {
+        if (t.id > max_id) max_id = t.id;
+    }
+    for (ctx.index.done) |t| {
+        if (t.id > max_id) max_id = t.id;
+    }
 
-    const empty: []const u8 = "";
-    const new_task: Task = .{
+    const new_id: u64 = max_id + 1;
+    const now_ms: i64 = std.time.milliTimestamp();
+
+    // For now, projects/contexts are empty; priority zero, status todo.
+    const new_task: store.Task = .{
+        .id = new_id,
         .text = text,
-        .prio = 0,
-        .due = empty,
-        .repeat = empty,
+        .proj_first = 0,
+        .proj_count = 0,
+        .ctx_first = 0,
+        .ctx_count = 0,
+        .priority = 0,
+        .status = .todo,
+        .due = "",       // no due date yet
+        .repeat = "",    // no repeat rule yet
+        .created_ms = now_ms,
     };
 
+    // Append to todo.jsonl
+    var file = ctx.todo_file.*; // copy; same OS handle
     try store.appendJsonTaskLine(allocator, &file, new_task);
 
-    // Reload index from disk.
+    // Reload index from disk (still O(file_size); see note in task_store).
     try ctx.index.reload(allocator, file, ctx.done_file.*);
 
     // Focus new task at bottom of TODO list.
