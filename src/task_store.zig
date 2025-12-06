@@ -313,16 +313,14 @@ fn parseTaskFromJsonLine(
     };
 }
 
-/// Append a single task line to a file in JSON-lines format:
-///   {"text":"..."}\n
 pub fn appendJsonTaskLine(
     allocator: mem.Allocator,
     file: *fs.File,
-    text: []const u8,
+    task: Task,
 ) !void {
     const stat = try file.stat();
     try file.seekTo(stat.size);
-    try writeJsonLineForText(allocator, file, text);
+    try writeJsonLineForTask(allocator, file, task);
 }
 
 /// Rewrite entire file in JSON-lines format using `tasks`,
@@ -344,12 +342,157 @@ pub fn rewriteJsonFileWithoutIndex(
     var i: usize = 0;
     while (i < tasks.len) : (i += 1) {
         if (i == skip_index) continue;
-        try writeJsonLineForText(allocator, file, tasks[i].text);
+        try writeJsonLineForTask(allocator, file, tasks[i]);
     }
 }
 
+
+
 // internal helpers 
 
+
+fn jsonEscapeInto(buf: []u8, pos: *usize, s: []const u8) void {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const b = s[i];
+        switch (b) {
+            '"' => {
+                buf[pos.*] = '\\'; pos.* += 1;
+                buf[pos.*] = '"'; pos.* += 1;
+            },
+            '\\' => {
+                buf[pos.*] = '\\'; pos.* += 1;
+                buf[pos.*] = '\\'; pos.* += 1;
+            },
+            '\n' => {
+                buf[pos.*] = '\\'; pos.* += 1;
+                buf[pos.*] = 'n'; pos.* += 1;
+            },
+            '\r' => {
+                buf[pos.*] = '\\'; pos.* += 1;
+                buf[pos.*] = 'r'; pos.* += 1;
+            },
+            '\t' => {
+                buf[pos.*] = '\\'; pos.* += 1;
+                buf[pos.*] = 't'; pos.* += 1;
+            },
+            else => {
+                buf[pos.*] = b;
+                pos.* += 1;
+            },
+        }
+    }
+}
+
+fn writeUintInto(buf: []u8, pos: *usize, value: u8) void {
+    var tmp: [3]u8 = undefined;
+    var n: u8 = value;
+    var digits: usize = 0;
+
+    if (n == 0) {
+        tmp[0] = '0';
+        digits = 1;
+    } else {
+        while (n != 0) : (n /= 10) {
+            const digit: u8 = n % 10;
+            tmp[digits] = @as(u8, '0') + digit;
+            digits += 1;
+        }
+    }
+
+    var i: usize = 0;
+    while (i < digits) : (i += 1) {
+        buf[pos.*] = tmp[digits - 1 - i];
+        pos.* += 1;
+    }
+}
+
+fn encodeTaskIntoBuf(buf: []u8, pos: *usize, task: Task) void {
+    // {"text":"...
+    buf[pos.*] = '{'; pos.* += 1;
+
+    buf[pos.*] = '"'; pos.* += 1;
+    buf[pos.*] = 't'; pos.* += 1;
+    buf[pos.*] = 'e'; pos.* += 1;
+    buf[pos.*] = 'x'; pos.* += 1;
+    buf[pos.*] = 't'; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+    buf[pos.*] = ':'; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+
+    jsonEscapeInto(buf, pos, task.text);
+
+    buf[pos.*] = '"'; pos.* += 1;
+
+    // ,"prio":
+    buf[pos.*] = ','; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+    buf[pos.*] = 'p'; pos.* += 1;
+    buf[pos.*] = 'r'; pos.* += 1;
+    buf[pos.*] = 'i'; pos.* += 1;
+    buf[pos.*] = 'o'; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+    buf[pos.*] = ':'; pos.* += 1;
+
+    writeUintInto(buf, pos, task.prio);
+
+    // ,"due":"..."
+    buf[pos.*] = ','; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+    buf[pos.*] = 'd'; pos.* += 1;
+    buf[pos.*] = 'u'; pos.* += 1;
+    buf[pos.*] = 'e'; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+    buf[pos.*] = ':'; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+
+    jsonEscapeInto(buf, pos, task.due);
+
+    buf[pos.*] = '"'; pos.* += 1;
+
+    // ,"repeat":"..."
+    buf[pos.*] = ','; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+    buf[pos.*] = 'r'; pos.* += 1;
+    buf[pos.*] = 'e'; pos.* += 1;
+    buf[pos.*] = 'p'; pos.* += 1;
+    buf[pos.*] = 'e'; pos.* += 1;
+    buf[pos.*] = 'a'; pos.* += 1;
+    buf[pos.*] = 't'; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+    buf[pos.*] = ':'; pos.* += 1;
+    buf[pos.*] = '"'; pos.* += 1;
+
+    jsonEscapeInto(buf, pos, task.repeat);
+
+    buf[pos.*] = '"'; pos.* += 1;
+    buf[pos.*] = '}'; pos.* += 1;
+    buf[pos.*] = '\n'; pos.* += 1;
+}
+
+fn writeJsonLineForTask(
+    allocator: mem.Allocator,
+    file: *fs.File,
+    task: Task,
+) !void {
+    const stack_cap: usize = 1024;
+    const overhead: usize = 64;
+    const total_input: usize = task.text.len + task.due.len + task.repeat.len;
+
+    if (total_input * 2 + overhead <= stack_cap) {
+        var buf: [stack_cap]u8 = undefined;
+        var pos: usize = 0;
+        encodeTaskIntoBuf(&buf, &pos, task);
+        try file.writeAll(buf[0..pos]);
+    } else {
+        const cap: usize = total_input * 2 + overhead;
+        var buf = try allocator.alloc(u8, cap);
+        defer allocator.free(buf);
+        var pos: usize = 0;
+        encodeTaskIntoBuf(buf, &pos, task);
+        try file.writeAll(buf[0..pos]);
+    }
+}
 
 fn copyPlainLine(
     line: []const u8,

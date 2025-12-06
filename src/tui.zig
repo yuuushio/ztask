@@ -654,19 +654,17 @@ fn markDone(
     if (todo_view.selected_index >= todos.len) return;
 
     const remove_index = todo_view.selected_index;
-    const text = todos[remove_index].text;
+    const task = todos[remove_index];
 
     // Append task to done.txt as JSON-lines.
     var done_file = ctx.done_file.*;
-    try store.appendJsonTaskLine(allocator, &done_file, text);
+    try store.appendJsonTaskLine(allocator, &done_file, task);
 
     // Rewrite todo.txt without the removed task.
     var todo_file = ctx.todo_file.*;
     try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, todos, remove_index);
 
     // Reload index from disk.
-    // See task_store.rewriteJsonFileWithoutIndex for the compaction notes:
-    // this is still a full rewrite on each :d.
     try ctx.index.reload(allocator, todo_file, done_file);
 
     // Adjust UI to remain in TODO list near where we were.
@@ -683,6 +681,8 @@ fn markDone(
     todo_view.last_move = -1;
 }
 
+
+
 fn saveNewTask(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
@@ -692,15 +692,20 @@ fn saveNewTask(
     const text = editor.asSlice();
     if (text.len == 0) return; // ignore empty tasks
 
-    // Append to todo.txt as JSON-lines.
-    var todo_file = ctx.todo_file.*; // same OS handle, copied value
-    try store.appendJsonTaskLine(allocator, &todo_file, text);
+    var file = ctx.todo_file.*; // copy; same OS handle
+
+    const empty: []const u8 = "";
+    const new_task: Task = .{
+        .text = text,
+        .prio = 0,
+        .due = empty,
+        .repeat = empty,
+    };
+
+    try store.appendJsonTaskLine(allocator, &file, new_task);
 
     // Reload index from disk.
-    // NOTE: this is still O(file_size). For very large files we can later
-    // replace this with an incremental path that parses only newly
-    // appended bytes and updates the index in place.
-    try ctx.index.reload(allocator, todo_file, ctx.done_file.*);
+    try ctx.index.reload(allocator, file, ctx.done_file.*);
 
     // Focus new task at bottom of TODO list.
     if (ctx.index.todo.len != 0) {
