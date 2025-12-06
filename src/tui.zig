@@ -1,5 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const store = @import("task_store.zig");
+
 const Cell = vaxis.Cell;
 
 const fs = std.fs;
@@ -10,6 +12,7 @@ const task_mod = @import("task_index.zig");
 const TaskIndex = task_mod.TaskIndex;
 
 const Task = task_mod.Task;
+
 
 const ui_mod = @import("ui_state.zig");
 const UiState = ui_mod.UiState;
@@ -639,13 +642,11 @@ fn handleListCommandKey(
 }
 
 
-
 fn markDone(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
     ui: *UiState,
 ) !void {
-    // Always operate on the TODO list; DONE is the target.
     const todos = ctx.index.todo;
     if (todos.len == 0) return;
 
@@ -653,57 +654,23 @@ fn markDone(
     if (todo_view.selected_index >= todos.len) return;
 
     const remove_index = todo_view.selected_index;
-    const line = todos[remove_index].text;
+    const text = todos[remove_index].text;
 
-    // Append the task line to done.txt
+    // Append task to done.txt as JSON-lines.
     var done_file = ctx.done_file.*;
-    const done_stat = try done_file.stat();
-    try done_file.seekTo(done_stat.size);
-    try done_file.writeAll(line);
-    try done_file.writeAll("\n");
+    try store.appendJsonTaskLine(allocator, &done_file, text);
 
-    // Compute total size of new todo.txt (all lines except the removed one).
-    var total_len: usize = 0;
-    var i: usize = 0;
-    while (i < todos.len) : (i += 1) {
-        if (i == remove_index) continue;
-        total_len += todos[i].text.len + 1; // + '\n'
-    }
-
-    const buf = try allocator.alloc(u8, total_len);
-    defer allocator.free(buf);
-
-    var pos: usize = 0;
-    i = 0;
-    while (i < todos.len) : (i += 1) {
-        if (i == remove_index) continue;
-        const src = todos[i].text;
-        @memcpy(buf[pos .. pos + src.len], src);
-        pos += src.len;
-        buf[pos] = '\n';
-        pos += 1;
-    }
-
+    // Rewrite todo.txt without the removed task.
     var todo_file = ctx.todo_file.*;
-    try todo_file.seekTo(0);
-    if (buf.len > 0) {
-        try todo_file.writeAll(buf);
-        try todo_file.setEndPos(@intCast(buf.len));
-    } else {
-        // No tasks left; truncate to zero.
-        try todo_file.setEndPos(0);
-    }
+    try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, todos, remove_index);
 
     // Reload index from disk.
-    // NOTE: This is an O(file_size) rewrite+reload for each :d.
-    // For very large files and many state changes the optimal design
-    // is to maintain append-only logs and an in-memory "live set" of
-    // task indices, and only occasionally rewrite compacted files.
+    // See task_store.rewriteJsonFileWithoutIndex for the compaction notes:
+    // this is still a full rewrite on each :d.
     try ctx.index.reload(allocator, todo_file, done_file);
 
     // Adjust UI to remain in TODO list near where we were.
     ui.focus = .todo;
-
     const new_len = ctx.index.todo.len;
     if (new_len == 0) {
         todo_view.selected_index = 0;
@@ -716,28 +683,24 @@ fn markDone(
     todo_view.last_move = -1;
 }
 
-
 fn saveNewTask(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
     editor: *EditorState,
     ui: *UiState,
 ) !void {
-    const line = editor.asSlice();
-    if (line.len == 0) return; // ignore empty tasks
+    const text = editor.asSlice();
+    if (text.len == 0) return; // ignore empty tasks
 
-    // Append to todo.txt
-    var file = ctx.todo_file.*; // copy; shares the same OS handle
-    const stat = try file.stat();
-    try file.seekTo(stat.size);
-    try file.writeAll(line);
-    try file.writeAll("\n");
+    // Append to todo.txt as JSON-lines.
+    var todo_file = ctx.todo_file.*; // same OS handle, copied value
+    try store.appendJsonTaskLine(allocator, &todo_file, text);
 
     // Reload index from disk.
-    // NOTE: this is O(file_size). For very large files we can later
-    // replace this with an incremental path that parses only the newly
+    // NOTE: this is still O(file_size). For very large files we can later
+    // replace this with an incremental path that parses only newly
     // appended bytes and updates the index in place.
-    try ctx.index.reload(allocator, file, ctx.done_file.*);
+    try ctx.index.reload(allocator, todo_file, ctx.done_file.*);
 
     // Focus new task at bottom of TODO list.
     if (ctx.index.todo.len != 0) {
@@ -745,7 +708,6 @@ fn saveNewTask(
         var todo_view = &ui.todo;
         todo_view.selected_index = ctx.index.todo.len - 1;
         todo_view.last_move = 1;
-        // scroll_offset will be normalized in drawTodoList via ensureValidSelection
     }
 }
 
