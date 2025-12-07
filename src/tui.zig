@@ -911,6 +911,32 @@ fn handleEditorKey(
                 return;
             }
 
+            // :t / :p / :d / :r -> change focus and go to insert mode
+            if (std.mem.eql(u8, cmd, "t")) {
+                editor.resetCommand();
+                editor.focus = .task;
+                editor.mode = .insert;
+                return;
+            }
+            if (std.mem.eql(u8, cmd, "p")) {
+                editor.resetCommand();
+                editor.focus = .priority;
+                editor.mode = .insert;
+                return;
+            }
+            if (std.mem.eql(u8, cmd, "d")) {
+                editor.resetCommand();
+                editor.focus = .due;
+                editor.mode = .insert;
+                return;
+            }
+            if (std.mem.eql(u8, cmd, "r")) {
+                editor.resetCommand();
+                editor.focus = .repeat;
+                editor.mode = .insert;
+                return;
+            }
+
             // Unknown command: just clear for now.
             editor.resetCommand();
             return;
@@ -946,37 +972,63 @@ fn handleEditorKey(
 
     switch (editor.mode) {
         .normal => {
-            // basic vim-like motions on a single line
             if (key.matches('i', .{})) {
                 editor.mode = .insert;
                 return;
             }
+
             if (key.matches('a', .{})) {
-                editor.moveToEnd();
+                switch (editor.focus) {
+                    .task => editor.moveToEnd(),
+                    .priority => editor.prio_cursor = editor.prio_len,
+                    .due => editor.due_cursor = editor.due_len,
+                    .repeat => editor.repeat_cursor = editor.repeat_len,
+                }
                 editor.mode = .insert;
                 return;
             }
-            if (key.matches('h', .{})) {
-                editor.moveCursor(-1);
-                return;
-            }
-            if (key.matches('l', .{})) {
-                editor.moveCursor(1);
-                return;
-            }
-            if (key.matches('0', .{})) {
-                editor.moveToStart();
-                return;
-            }
-            if (key.matches('$', .{})) {
-                editor.moveToEnd();
-                return;
+
+            // Vim motions only make sense on the main text for now.
+            if (editor.focus == .task) {
+                if (key.matches('h', .{})) {
+                    editor.moveCursor(-1);
+                    return;
+                }
+                if (key.matches('l', .{})) {
+                    editor.moveCursor(1);
+                    return;
+                }
+                if (key.matches('0', .{})) {
+                    editor.moveToStart();
+                    return;
+                }
+                if (key.matches('$', .{})) {
+                    editor.moveToEnd();
+                    return;
+                }
             }
         },
         .insert => {
-            // Backspace deletes
+            // Backspace deletes in the focused field
             if (key.matches(vaxis.Key.backspace, .{})) {
-                editor.deleteBeforeCursor();
+                switch (editor.focus) {
+                    .task => editor.deleteBeforeCursor(),
+                    .priority => deleteBeforeInBuffer(
+                        editor.prio_buf[0..],
+                        &editor.prio_len,
+                        &editor.prio_cursor,
+                    ),
+                    .due => deleteBeforeInBuffer(
+                        editor.due_buf[0..],
+                        &editor.due_len,
+                        &editor.due_cursor,
+                    ),
+                    .repeat => deleteBeforeInBuffer(
+                        editor.repeat_buf[0..],
+                        &editor.repeat_len,
+                        &editor.repeat_cursor,
+                    ),
+                }
                 return;
             }
 
@@ -986,9 +1038,29 @@ fn handleEditorKey(
                 return;
             }
 
-            // Printable ASCII
+            // Printable ASCII routes to the focused buffer
             if (keyToAscii(key)) |ch| {
-                editor.insertChar(ch);
+                switch (editor.focus) {
+                    .task => editor.insertChar(ch),
+                    .priority => insertIntoBuffer(
+                        editor.prio_buf[0..],
+                        &editor.prio_len,
+                        &editor.prio_cursor,
+                        ch,
+                    ),
+                    .due => insertIntoBuffer(
+                        editor.due_buf[0..],
+                        &editor.due_len,
+                        &editor.due_cursor,
+                        ch,
+                    ),
+                    .repeat => insertIntoBuffer(
+                        editor.repeat_buf[0..],
+                        &editor.repeat_len,
+                        &editor.repeat_cursor,
+                        ch,
+                    ),
+                }
             }
         },
     }
