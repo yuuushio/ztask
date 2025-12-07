@@ -567,48 +567,54 @@ fn isTagWordChar(b: u8) bool {
            (b == '_') or (b == '-') or (b=='/');
 }
 
-/// Scan `text` and emit a JSON array of tag names into `w`.
-/// `marker` is '+' for projects, '#' for contexts.
-fn writeTagsFromText(
-    w: anytype,
+/// Scan `text` for tags starting with `marker` ('+' for projects, '#' for contexts).
+/// We require the marker to be at a word boundary and followed by a word-char,
+/// so "do this + that" is not a tag, and "foo+bar@example.com" is not either.
+fn collectTags(
     text: []const u8,
     marker: u8,
-) !void {
-    var first = true;
+    out: *[16][]const u8,
+    out_count: *usize,
+) void {
     var i: usize = 0;
-    const n = text.len;
+    const len = text.len;
 
-    while (i < n) {
-        const b = text[i];
+    while (i < len) : (i += 1) {
+        if (text[i] != marker) continue;
 
-        if (b == marker and (i == 0 or isTagBoundary(text[i - 1]))) {
-            const start = i + 1;
-            if (start >= n) {
-                i += 1;
-                continue;
-            }
-
-            // require a letter after '+' / '#'
-            if (!isTagStartChar(text[start])) {
-                i += 1;
-                continue;
-            }
-
-            var j = start + 1;
-            while (j < n and isTagChar(text[j])) : (j += 1) {}
-
-            const name = text[start..j];
-
-            if (!first) try w.writeByte(',');
-            try writeJsonString(w, name);
-            first = false;
-
-            i = j;
-        } else {
-            i += 1;
+        if (i > 0 and !isTagBoundaryChar(text[i - 1])) {
+            continue;
         }
+
+        const start = i + 1;
+        if (start >= len) break;
+
+        const first = text[start];
+        if (!isTagWordChar(first)) continue;
+
+        var end: usize = start + 1;
+        while (end < len and isTagWordChar(text[end])) : (end += 1) {}
+
+        const tag = text[start..end];
+
+        // Deduplicate within this task, small fixed set.
+        var exists = false;
+        var j: usize = 0;
+        while (j < out_count.*) : (j += 1) {
+            if (std.mem.eql(u8, out.*[j], tag)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists and out_count.* < 16) {
+            out.*[out_count.*] = tag;
+            out_count.* += 1;
+        }
+
+        i = end;
     }
 }
+
 
 /// Parse one JSON-line into a Task whose slices point into `text_buf`.
 fn parseTaskFromJsonLine(
@@ -667,14 +673,9 @@ fn writeJsonLineForTask(
     file: *fs.File,
     task: Task,
 ) !void {
-    // Worst case we escape the whole text twice (projects+contexts),
-    // plus due/repeat. Just over-allocate a bit.
-    const overhead: usize = 256;
-    const approx_len =
-        task.text.len * 4 +
-        task.due.len * 2 +
-        task.repeat.len * 2 +
-        overhead;
+    // Rough but safe upper bound: each character might become "\u00XX"
+    // and some characters can appear again in tags, so we reserve a factor.
+    const approx_len = (task.text.len + task.due.len + task.repeat.len + 32) * 12;
 
     var buf = try allocator.alloc(u8, approx_len);
     defer allocator.free(buf);
@@ -682,22 +683,39 @@ fn writeJsonLineForTask(
     var fbs = std.io.fixedBufferStream(buf);
     var w = fbs.writer();
 
-    // fixed field order
+    // Derive projects/contexts from the visible text.
+    var proj_tags: [16][]const u8 = undefined;
+    var proj_count: usize = 0;
+    var ctx_tags: [16][]const u8 = undefined;
+    var ctx_count: usize = 0;
+
+    collectTags(task.text, '+', &proj_tags, &proj_count);
+    collectTags(task.text, '#', &ctx_tags, &ctx_count);
+
+    // Keep field order stable for manual parsing.
     try w.writeAll("{\"id\":");
     try w.print("{d}", .{task.id});
 
     try w.writeAll(",\"text\":");
     try writeJsonString(w, task.text);
 
-    // projects from +tags
+    // projects: ["proj1","proj2",...]
     try w.writeAll(",\"projects\":[");
-    try writeTagsFromText(w, task.text, '+');
-    try w.writeAll("]");
+    var i: usize = 0;
+    while (i < proj_count) : (i += 1) {
+        if (i != 0) try w.writeByte(',');
+        try writeJsonString(w, proj_tags[i]);
+    }
+    try w.writeByte(']');
 
-    // contexts from #tags
+    // contexts: ["ctx1","ctx2",...]
     try w.writeAll(",\"contexts\":[");
-    try writeTagsFromText(w, task.text, '#');
-    try w.writeAll("]");
+    i = 0;
+    while (i < ctx_count) : (i += 1) {
+        if (i != 0) try w.writeByte(',');
+        try writeJsonString(w, ctx_tags[i]);
+    }
+    try w.writeByte(']');
 
     try w.writeAll(",\"priority\":");
     try w.print("{d}", .{task.priority});
@@ -716,7 +734,6 @@ fn writeJsonLineForTask(
         try writeJsonString(w, task.repeat);
     }
 
-    // created_ms stays as integer for now; fast to sort on.
     try w.writeAll(",\"created\":");
     try w.print("{d}", .{task.created_ms});
 
