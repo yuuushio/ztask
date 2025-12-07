@@ -641,6 +641,7 @@ fn drawRect(
     }
 }
 
+
 fn drawMetaFieldBox(
     win: vaxis.Window,
     top: u16,
@@ -649,6 +650,7 @@ fn drawMetaFieldBox(
     focused: bool,
     show_cursor: bool,
 ) void {
+    // Each field uses 3 rows: top border, content, bottom border.
     if (top + 2 >= win.height) return;
 
     const base_style: vaxis.Style = .{};
@@ -659,9 +661,10 @@ fn drawMetaFieldBox(
     const style = if (focused) focus_style else base_style;
 
     const mid_row: u16 = top + 1;
+
+    // Draw label: "prio:", "due:", "repeat:"
     var col: u16 = 2;
     var i: usize = 0;
-
     while (i < label.len and col < win.width) : (i += 1) {
         const g = label[i .. i + 1];
         _ = win.writeCell(col, mid_row, .{
@@ -672,7 +675,7 @@ fn drawMetaFieldBox(
     }
 
     if (col < win.width) {
-        const colon = ":";
+        const colon = ":"[0..1];
         _ = win.writeCell(col, mid_row, .{
             .char = .{ .grapheme = colon, .width = 1 },
             .style = style,
@@ -680,28 +683,43 @@ fn drawMetaFieldBox(
         col += 1;
     }
     if (col < win.width) {
-        const sp = " ";
+        const space = " "[0..1];
         _ = win.writeCell(col, mid_row, .{
-            .char = .{ .grapheme = sp, .width = 1 },
+            .char = .{ .grapheme = space, .width = 1 },
             .style = style,
         });
         col += 1;
     }
 
-    if (col + 4 >= win.width) return; // not enough room for a box
+    // Need at least 3 columns for a box: "|" " " "|".
+    if (col + 3 >= win.width) return;
 
     const box_left: u16 = col;
-    var box_right: u16 = box_left + 20; // nominal width
-    const max_right: u16 = win.width - 2;
-    if (box_right > max_right) box_right = max_right;
 
-    const box_top: u16 = top;
+    // Interior width grows with value.len (+ cursor), but is clamped to fit.
+    var inner_w: usize = value.len;
+    if (inner_w == 0) inner_w = 1; // minimal visible box
+    if (show_cursor) inner_w += 1;
+
+    const available: usize = @intCast(win.width - box_left);
+    if (available <= 3) return; // not enough space for borders + 1 char
+
+    const max_inner: usize = available - 2;
+    if (inner_w > max_inner) inner_w = max_inner;
+
+    const total_w: u16 = @intCast(inner_w + 2);
+    const box_right: u16 = box_left + total_w - 1;
+    if (box_right >= win.width) return;
+
     const box_bottom: u16 = top + 2;
 
-    drawRect(win, box_left, box_top, box_right, box_bottom, style);
+    // Outer rectangle (ASCII borders).
+    drawRect(win, box_left, top, box_right, box_bottom, style);
 
+    // Value inside the box.
     var val_col: u16 = box_left + 1;
     const val_row: u16 = mid_row;
+
     i = 0;
     while (i < value.len and val_col < box_right) : (i += 1) {
         const g = value[i .. i + 1];
@@ -713,7 +731,7 @@ fn drawMetaFieldBox(
     }
 
     if (show_cursor and val_col < box_right) {
-        const cursor = "_";
+        const cursor = "_"[0..1];
         _ = win.writeCell(val_col, val_row, .{
             .char = .{ .grapheme = cursor, .width = 1 },
             .style = style,
@@ -772,8 +790,6 @@ fn drawEditorMeta(
         );
     }
 }
-
-
 
 
 fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
