@@ -548,10 +548,11 @@ fn parseStatusField(line: []const u8) ParseError!Status {
 }
 
 
-fn isTagBoundary(b: u8) bool {
-    return b == ' ' or b == '\t' or
-        b == '(' or b == '[' or b == '{' or
-        b == ',' or b == ';' or b == ':';
+fn isTagBoundaryChar(b: u8) bool {
+    return b == ' ' or b == '\t' or b == '\n' or b == '\r' or
+           b == '(' or b == ')' or b == '[' or b == ']' or
+           b == '{' or b == '}' or b == ',' or b == '.' or
+           b == ':' or b == ';' or b == '"' or b == '\'';
 }
 
 fn isTagStartChar(b: u8) bool {
@@ -559,12 +560,11 @@ fn isTagStartChar(b: u8) bool {
            (b >= 'a' and b <= 'z');
 }
 
-fn isTagChar(b: u8) bool {
-    return
-        (b >= 'A' and b <= 'Z') or
-        (b >= 'a' and b <= 'z') or
-        (b >= '0' and b <= '9') or
-        (b == '_') or (b == '-') or (b == '/');
+fn isTagWordChar(b: u8) bool {
+    return (b >= 'a' and b <= 'z') or
+           (b >= 'A' and b <= 'Z') or
+           (b >= '0' and b <= '9') or
+           (b == '_') or (b == '-') or (b=='/');
 }
 
 /// Scan `text` and emit a JSON array of tag names into `w`.
@@ -616,31 +616,34 @@ fn parseTaskFromJsonLine(
     text_buf: []u8,
     cursor: *usize,
 ) ParseError!Task {
-    // Required text field
-    const text_slice   = try parseStringField(line, "text", true,  text_buf, cursor);
-
-    // Optional string fields
+    // Core string fields
+    const text_slice   = try parseStringField(line, "text",   true,  text_buf, cursor);
     const due_slice    = try parseStringField(line, "due",    false, text_buf, cursor);
     const repeat_slice = try parseStringField(line, "repeat", false, text_buf, cursor);
 
-    // Optional numeric/enum fields; fall back to safe defaults if absent.
-    const prio        = parsePriorityField(line);
-    const id_val      = parseUnsignedField(line, "id")      orelse 0;
-    const created_val = parseSignedField(line,   "created") orelse 0;
-    const status_val  = parseStatusField(line) catch Status.todo;
+    // Scalars
+    const prio_val     = parsePriorityField(line);
+    const id_opt       = parseUnsignedField(line, "id");
+    const created_opt  = parseSignedField(line, "created");
+
+    // Status; if field is malformed or absent, fall back to .todo
+    const status_val = parseStatusField(line) catch Status.todo;
+
+    // Shared empty slice sentinel out of text_buf
+    const empty = text_buf[cursor.*..cursor.*];
 
     return Task{
-        .id         = id_val,
+        .id         = id_opt orelse 0,
         .text       = text_slice,
         .proj_first = 0,
         .proj_count = 0,
         .ctx_first  = 0,
         .ctx_count  = 0,
-        .priority   = prio,
+        .priority   = prio_val,
         .status     = status_val,
-        .due        = due_slice,
-        .repeat     = repeat_slice,
-        .created_ms = created_val,
+        .due        = if (due_slice.len != 0) due_slice else empty,
+        .repeat     = if (repeat_slice.len != 0) repeat_slice else empty,
+        .created_ms = created_opt orelse 0,
     };
 }
 
