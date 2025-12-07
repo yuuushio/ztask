@@ -79,7 +79,7 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
 
     const size: usize = @intCast(stat.size);
 
-    // Read whole file in one go.
+    // Read whole file.
     var raw = try allocator.alloc(u8, size);
     errdefer allocator.free(raw);
 
@@ -111,7 +111,7 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
     }
 
     var tasks = try allocator.alloc(Task, line_count);
-    const buf = try allocator.alloc(u8, raw_slice.len);
+    var buf = try allocator.alloc(u8, raw_slice.len);
     var parse_ok = false;
     defer {
         if (!parse_ok) {
@@ -127,12 +127,32 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
     i = 0;
     while (i < raw_slice.len) : (i += 1) {
         if (raw_slice[i] == '\n') {
-            const line = raw_slice[line_start..i];
+            const raw_line = raw_slice[line_start..i];
+            const line = trimLine(raw_line);
 
-            // skip completely empty lines silently
             if (line.len != 0) {
-                const task = try parseTaskFromJsonLine(line, buf, &text_cursor);
-                tasks[task_index] = task;
+                if (line[0] == '{') {
+                    // JSON task
+                    const task = try parseTaskFromJsonLine(line, buf, &text_cursor);
+                    tasks[task_index] = task;
+                } else {
+                    // Legacy plain-text task
+                    const text_slice = copyPlainLine(line, buf, &text_cursor);
+                    const empty = buf[text_cursor..text_cursor];
+                    tasks[task_index] = .{
+                        .id = 0,
+                        .text = text_slice,
+                        .proj_first = 0,
+                        .proj_count = 0,
+                        .ctx_first = 0,
+                        .ctx_count = 0,
+                        .priority = 0,
+                        .status = .todo,
+                        .due = empty,
+                        .repeat = empty,
+                        .created_ms = 0,
+                    };
+                }
                 task_index += 1;
             }
 
@@ -141,10 +161,30 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
     }
 
     if (line_start < raw_slice.len) {
-        const line = raw_slice[line_start..raw_slice.len];
+        const raw_line = raw_slice[line_start..raw_slice.len];
+        const line = trimLine(raw_line);
+
         if (line.len != 0) {
-            const task = try parseTaskFromJsonLine(line, buf, &text_cursor);
-            tasks[task_index] = task;
+            if (line[0] == '{') {
+                const task = try parseTaskFromJsonLine(line, buf, &text_cursor);
+                tasks[task_index] = task;
+            } else {
+                const text_slice = copyPlainLine(line, buf, &text_cursor);
+                const empty = buf[text_cursor..text_cursor];
+                tasks[task_index] = .{
+                    .id = 0,
+                    .text = text_slice,
+                    .proj_first = 0,
+                    .proj_count = 0,
+                    .ctx_first = 0,
+                    .ctx_count = 0,
+                    .priority = 0,
+                    .status = .todo,
+                    .due = empty,
+                    .repeat = empty,
+                    .created_ms = 0,
+                };
+            }
             task_index += 1;
         }
     }
@@ -157,6 +197,46 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
         .tasks = tasks[0..task_index],
         .spans = &[_]Span{},
     };
+}
+
+
+fn trimLine(line: []const u8) []const u8 {
+    var start: usize = 0;
+    var end: usize = line.len;
+
+    while (start < end and
+        (line[start] == ' ' or line[start] == '\t' or line[start] == '\r'))
+    {
+        start += 1;
+    }
+    while (end > start and
+        (line[end - 1] == ' ' or line[end - 1] == '\t' or line[end - 1] == '\r'))
+    {
+        end -= 1;
+    }
+    return line[start..end];
+}
+
+fn copyPlainLine(
+    line: []const u8,
+    text_buf: []u8,
+    cursor: *usize,
+) []const u8 {
+    // No JSON, no escape parsing. Just copy the bytes and trim trailing '\r'.
+    var end = line.len;
+    if (end > 0 and line[end - 1] == '\r') {
+        end -= 1;
+    }
+
+    const dst_start = cursor.*;
+    const len = end;
+
+    if (len != 0) {
+        @memcpy(text_buf[dst_start .. dst_start + len], line[0..len]);
+    }
+
+    cursor.* = dst_start + len;
+    return text_buf[dst_start .. dst_start + len];
 }
 
 
@@ -467,20 +547,87 @@ fn parseStatusField(line: []const u8) ParseError!Status {
     return ParseError.InvalidJson;
 }
 
+
+fn isTagBoundary(b: u8) bool {
+    return b == ' ' or b == '\t' or
+        b == '(' or b == '[' or b == '{' or
+        b == ',' or b == ';' or b == ':';
+}
+
+fn isTagStartChar(b: u8) bool {
+    return (b >= 'A' and b <= 'Z') or
+           (b >= 'a' and b <= 'z');
+}
+
+fn isTagChar(b: u8) bool {
+    return
+        (b >= 'A' and b <= 'Z') or
+        (b >= 'a' and b <= 'z') or
+        (b >= '0' and b <= '9') or
+        (b == '_') or (b == '-') or (b == '/');
+}
+
+/// Scan `text` and emit a JSON array of tag names into `w`.
+/// `marker` is '+' for projects, '#' for contexts.
+fn writeTagsFromText(
+    w: anytype,
+    text: []const u8,
+    marker: u8,
+) !void {
+    var first = true;
+    var i: usize = 0;
+    const n = text.len;
+
+    while (i < n) {
+        const b = text[i];
+
+        if (b == marker and (i == 0 or isTagBoundary(text[i - 1]))) {
+            const start = i + 1;
+            if (start >= n) {
+                i += 1;
+                continue;
+            }
+
+            // require a letter after '+' / '#'
+            if (!isTagStartChar(text[start])) {
+                i += 1;
+                continue;
+            }
+
+            var j = start + 1;
+            while (j < n and isTagChar(text[j])) : (j += 1) {}
+
+            const name = text[start..j];
+
+            if (!first) try w.writeByte(',');
+            try writeJsonString(w, name);
+            first = false;
+
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// Parse one JSON-line into a Task whose slices point into `text_buf`.
 fn parseTaskFromJsonLine(
     line: []const u8,
     text_buf: []u8,
     cursor: *usize,
 ) ParseError!Task {
-    const text_slice   = try parseStringField(line, "text",    true,  text_buf, cursor);
-    const due_slice    = try parseStringField(line, "due",     false, text_buf, cursor);
-    const repeat_slice = try parseStringField(line, "repeat",  false, text_buf, cursor);
+    // Required text field
+    const text_slice   = try parseStringField(line, "text", true,  text_buf, cursor);
 
-    const prio         = parsePriorityField(line);
-    const id_val       = parseUnsignedField(line, "id")      orelse 0;
-    const created_val  = parseSignedField(line,   "created") orelse 0;
-    const status_val   = parseStatusField(line) catch Status.todo;
+    // Optional string fields
+    const due_slice    = try parseStringField(line, "due",    false, text_buf, cursor);
+    const repeat_slice = try parseStringField(line, "repeat", false, text_buf, cursor);
+
+    // Optional numeric/enum fields; fall back to safe defaults if absent.
+    const prio        = parsePriorityField(line);
+    const id_val      = parseUnsignedField(line, "id")      orelse 0;
+    const created_val = parseSignedField(line,   "created") orelse 0;
+    const status_val  = parseStatusField(line) catch Status.todo;
 
     return Task{
         .id         = id_val,
@@ -517,10 +664,11 @@ fn writeJsonLineForTask(
     file: *fs.File,
     task: Task,
 ) !void {
-    // Rough upper bound: escape expansion roughly x2 plus overhead for keys.
-    const overhead: usize = 128;
+    // Worst case we escape the whole text twice (projects+contexts),
+    // plus due/repeat. Just over-allocate a bit.
+    const overhead: usize = 256;
     const approx_len =
-        task.text.len * 2 +
+        task.text.len * 4 +
         task.due.len * 2 +
         task.repeat.len * 2 +
         overhead;
@@ -531,19 +679,21 @@ fn writeJsonLineForTask(
     var fbs = std.io.fixedBufferStream(buf);
     var w = fbs.writer();
 
-    // Keep field order stable for fast manual parsing later.
+    // fixed field order
     try w.writeAll("{\"id\":");
     try w.print("{d}", .{task.id});
 
     try w.writeAll(",\"text\":");
     try writeJsonString(w, task.text);
 
+    // projects from +tags
     try w.writeAll(",\"projects\":[");
-    // TODO: later derive actual project names from spans.
+    try writeTagsFromText(w, task.text, '+');
     try w.writeAll("]");
 
+    // contexts from #tags
     try w.writeAll(",\"contexts\":[");
-    // TODO: later derive actual context names from spans.
+    try writeTagsFromText(w, task.text, '#');
     try w.writeAll("]");
 
     try w.writeAll(",\"priority\":");
@@ -563,6 +713,7 @@ fn writeJsonLineForTask(
         try writeJsonString(w, task.repeat);
     }
 
+    // created_ms stays as integer for now; fast to sort on.
     try w.writeAll(",\"created\":");
     try w.print("{d}", .{task.created_ms});
 
