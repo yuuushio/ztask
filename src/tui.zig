@@ -200,11 +200,8 @@ pub fn run(
                                 list_cmd_active = true;
                                 list_cmd_new = false;
                                 list_cmd_done = false;
-                            } else if (handleListFocusKey(key, ui, ctx.index)) {
+                            } else if (!handleListFocusKey(key, ui, ctx.index)) {
 
-                            }
-                            else {
-                                // Normal list navigation (j/k, arrows, etc.)
                                 handleNavigation(&vx, ctx.index, ui, key);
                             }
                         }
@@ -246,8 +243,8 @@ fn switchFocus(ui: *UiState, index: *const TaskIndex, target: ListKind) void {
     var view = ui.activeView();
 
     const len: usize = switch (target) {
-        .todo => index.todo.len,
-        .done => index.done.len,
+        .todo => index.todoSlice().len,
+        .done => index.doneSlice().len,
     };
 
     if (len == 0) {
@@ -299,8 +296,8 @@ fn handleNavigation(vx: *vaxis.Vaxis, index: *const TaskIndex, ui: *UiState, key
     const viewport_height = term_height - LIST_START_ROW;
 
     const active_len: usize = switch (ui.focus) {
-        .todo => index.todo.len,
-        .done => index.done.len,
+        .todo => index.todoSlice().len,
+        .done => index.doneSlice().len,
     };
 
     if (active_len == 0 or viewport_height == 0) return;
@@ -368,11 +365,13 @@ fn drawHeader(win: vaxis.Window) void {
 
 
 fn drawCounts(win: vaxis.Window, index: *const TaskIndex, ui: *const UiState) void {
+    const todo_len = index.todoSlice().len;
+    const done_len = index.doneSlice().len;
     // Format into the static buffer.
     const text = std.fmt.bufPrint(
         &counts_buf,
         "TODO {d}  DONE {d}",
-        .{ index.todo.len, index.done.len },
+        .{ todo_len, done_len },
     ) catch counts_buf[0..0];
 
     const term_width: usize = @intCast(win.width);
@@ -647,7 +646,7 @@ fn markDone(
     allocator: std.mem.Allocator,
     ui: *UiState,
 ) !void {
-    const todos = ctx.index.todo;
+    const todos = ctx.index.todoSlice();
     if (todos.len == 0) return;
 
     var todo_view = &ui.todo;
@@ -671,7 +670,7 @@ fn markDone(
     try ctx.index.reload(allocator, todo_file, done_file);
 
     ui.focus = .todo;
-    const new_len = ctx.index.todo.len;
+    const new_len = ctx.index.todoSlice().len;
     if (new_len == 0) {
         todo_view.selected_index = 0;
         todo_view.scroll_offset = 0;
@@ -696,10 +695,10 @@ fn saveNewTask(
     // Compute next id cheaply: scan existing todo/done once and keep max.
     // This is O(n) but only on :w from editor, not on every redraw.
     var max_id: u64 = 0;
-    for (ctx.index.todo) |t| {
+    for (ctx.index.todoSlice()) |t| {
         if (t.id > max_id) max_id = t.id;
     }
-    for (ctx.index.done) |t| {
+    for (ctx.index.doneSlice()) |t| {
         if (t.id > max_id) max_id = t.id;
     }
 
@@ -729,10 +728,10 @@ fn saveNewTask(
     try ctx.index.reload(allocator, file, ctx.done_file.*);
 
     // Focus new task at bottom of TODO list.
-    if (ctx.index.todo.len != 0) {
+    if (ctx.index.todoSlice().len != 0) {
         ui.focus = .todo;
         var todo_view = &ui.todo;
-        todo_view.selected_index = ctx.index.todo.len - 1;
+        todo_view.selected_index = ctx.index.todoSlice().len - 1;
         todo_view.last_move = 1;
     }
 }
@@ -1096,8 +1095,8 @@ fn drawTodoList(
     cmd_active: bool,
 ) void {
     const tasks: []const Task = switch (ui.focus) {
-        .todo => index.todo,
-        .done => index.done,
+        .todo => index.todoSlice(),
+        .done => index.doneSlice(),
     };
     var view = ui.activeView();
 
