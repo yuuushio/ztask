@@ -808,11 +808,14 @@ fn saveNewTask(
     editor: *EditorState,
     ui: *UiState,
 ) !void {
-    const text = editor.asSlice();
+    const text = editor.taskSlice();
     if (text.len == 0) return; // ignore empty tasks
 
+    const due = editor.dueSlice();
+    const repeat = editor.repeatSlice();
+    const prio_val: u8 = editor.priorityValue();
+
     // Compute next id cheaply: scan existing todo/done once and keep max.
-    // This is O(n) but only on :w from editor, not on every redraw.
     var max_id: u64 = 0;
     for (ctx.index.todoSlice()) |t| {
         if (t.id > max_id) max_id = t.id;
@@ -824,7 +827,6 @@ fn saveNewTask(
     const new_id: u64 = max_id + 1;
     const now_ms: i64 = std.time.milliTimestamp();
 
-    // For now, projects/contexts are empty; priority zero, status todo.
     const new_task: store.Task = .{
         .id = new_id,
         .text = text,
@@ -832,21 +834,18 @@ fn saveNewTask(
         .proj_count = 0,
         .ctx_first = 0,
         .ctx_count = 0,
-        .priority = 0,
+        .priority = prio_val,
         .status = .todo,
-        .due = "",       // no due date yet
-        .repeat = "",    // no repeat rule yet
+        .due = due,
+        .repeat = repeat,
         .created_ms = now_ms,
     };
 
-    // Append to todo.jsonl
     var file = ctx.todo_file.*; // copy; same OS handle
     try store.appendJsonTaskLine(allocator, &file, new_task);
 
-    // Reload index from disk (still O(file_size); see note in task_store).
     try ctx.index.reload(allocator, file, ctx.done_file.*);
 
-    // Focus new task at bottom of TODO list.
     if (ctx.index.todoSlice().len != 0) {
         ui.focus = .todo;
         var todo_view = &ui.todo;
