@@ -576,6 +576,206 @@ fn drawListCommandLine(win: vaxis.Window, active: bool, new_flag: bool, done_fla
 }
 
 
+fn drawRect(
+    win: vaxis.Window,
+    left: u16,
+    top: u16,
+    right_incl: u16,
+    bottom_incl: u16,
+    style: vaxis.Style,
+) void {
+    if (left >= win.width or top >= win.height) return;
+
+    var right = right_incl;
+    var bottom = bottom_incl;
+    if (right >= win.width) right = win.width - 1;
+    if (bottom >= win.height) bottom = win.height - 1;
+    if (right <= left or bottom <= top) return;
+
+    const tl = "┌";
+    const tr = "┐";
+    const bl = "└";
+    const br = "┘";
+    const horiz = "─";
+    const vert = "│";
+
+    _ = win.writeCell(left, top, .{
+        .char = .{ .grapheme = tl, .width = 1 },
+        .style = style,
+    });
+    _ = win.writeCell(right, top, .{
+        .char = .{ .grapheme = tr, .width = 1 },
+        .style = style,
+    });
+    _ = win.writeCell(left, bottom, .{
+        .char = .{ .grapheme = bl, .width = 1 },
+        .style = style,
+    });
+    _ = win.writeCell(right, bottom, .{
+        .char = .{ .grapheme = br, .width = 1 },
+        .style = style,
+    });
+
+    var x: u16 = left + 1;
+    while (x < right) : (x += 1) {
+        _ = win.writeCell(x, top, .{
+            .char = .{ .grapheme = horiz, .width = 1 },
+            .style = style,
+        });
+        _ = win.writeCell(x, bottom, .{
+            .char = .{ .grapheme = horiz, .width = 1 },
+            .style = style,
+        });
+    }
+
+    var y: u16 = top + 1;
+    while (y < bottom) : (y += 1) {
+        _ = win.writeCell(left, y, .{
+            .char = .{ .grapheme = vert, .width = 1 },
+            .style = style,
+        });
+        _ = win.writeCell(right, y, .{
+            .char = .{ .grapheme = vert, .width = 1 },
+            .style = style,
+        });
+    }
+}
+
+fn drawMetaFieldBox(
+    win: vaxis.Window,
+    top: u16,
+    label: []const u8,
+    value: []const u8,
+    focused: bool,
+    show_cursor: bool,
+) void {
+    if (top + 2 >= win.height) return;
+
+    const base_style: vaxis.Style = .{};
+    const focus_style: vaxis.Style = .{
+        .bold = true,
+        .fg = .{ .rgb = .{ 220, 220, 255 } },
+    };
+    const style = if (focused) focus_style else base_style;
+
+    const mid_row: u16 = top + 1;
+    var col: u16 = 2;
+    var i: usize = 0;
+
+    while (i < label.len and col < win.width) : (i += 1) {
+        const g = label[i .. i + 1];
+        _ = win.writeCell(col, mid_row, .{
+            .char = .{ .grapheme = g, .width = 1 },
+            .style = style,
+        });
+        col += 1;
+    }
+
+    if (col < win.width) {
+        const colon = ":";
+        _ = win.writeCell(col, mid_row, .{
+            .char = .{ .grapheme = colon, .width = 1 },
+            .style = style,
+        });
+        col += 1;
+    }
+    if (col < win.width) {
+        const sp = " ";
+        _ = win.writeCell(col, mid_row, .{
+            .char = .{ .grapheme = sp, .width = 1 },
+            .style = style,
+        });
+        col += 1;
+    }
+
+    if (col + 4 >= win.width) return; // not enough room for a box
+
+    const box_left: u16 = col;
+    var box_right: u16 = box_left + 20; // nominal width
+    const max_right: u16 = win.width - 2;
+    if (box_right > max_right) box_right = max_right;
+
+    const box_top: u16 = top;
+    const box_bottom: u16 = top + 2;
+
+    drawRect(win, box_left, box_top, box_right, box_bottom, style);
+
+    var val_col: u16 = box_left + 1;
+    const val_row: u16 = mid_row;
+    i = 0;
+    while (i < value.len and val_col < box_right) : (i += 1) {
+        const g = value[i .. i + 1];
+        _ = win.writeCell(val_col, val_row, .{
+            .char = .{ .grapheme = g, .width = 1 },
+            .style = style,
+        });
+        val_col += 1;
+    }
+
+    if (show_cursor and val_col < box_right) {
+        const cursor = "_";
+        _ = win.writeCell(val_col, val_row, .{
+            .char = .{ .grapheme = cursor, .width = 1 },
+            .style = style,
+        });
+    }
+}
+
+fn drawEditorMeta(
+    win: vaxis.Window,
+    first_top: u16,
+    editor: *const EditorState,
+) void {
+    const term_height: u16 = win.height;
+    if (first_top >= term_height) return;
+
+    // Each field consumes 3 rows (top border, middle, bottom border).
+    var top = first_top;
+
+    // priority
+    if (top + 2 < term_height) {
+        drawMetaFieldBox(
+            win,
+            top,
+            "prio",
+            editor.prioSlice(),
+            editor.focus == .priority,
+            editor.focus == .priority and editor.mode == .insert,
+        );
+    }
+    top += 3;
+    if (top >= term_height) return;
+
+    // due
+    if (top + 2 < term_height) {
+        drawMetaFieldBox(
+            win,
+            top,
+            "due",
+            editor.dueSlice(),
+            editor.focus == .due,
+            editor.focus == .due and editor.mode == .insert,
+        );
+    }
+    top += 3;
+    if (top >= term_height) return;
+
+    // repeat
+    if (top + 2 < term_height) {
+        drawMetaFieldBox(
+            win,
+            top,
+            "repeat",
+            editor.repeatSlice(),
+            editor.focus == .repeat,
+            editor.focus == .repeat and editor.mode == .insert,
+        );
+    }
+}
+
+
+
+
 fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
     const term_width: usize = @intCast(win.width);
     const term_height: usize = @intCast(win.height);
@@ -593,7 +793,6 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         .fg = .{ .rgb = .{ 180, 180, 180 } },
     };
 
-    // mode indicator at row 1, left-aligned
     var col: u16 = 0;
     var i: usize = 0;
     while (i < mode_text.len and col < win.width) : (i += 1) {
@@ -605,7 +804,7 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         col += 1;
     }
 
-    // label "Task:" at row 3
+    // "Task:" label and main text as before
     const label = "Task:";
     const label_row: u16 = if (term_height > 3) 3 else 1;
     col = 2;
@@ -620,9 +819,8 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         col += 1;
     }
 
-    // task text at row 4
     const text_row: u16 = if (term_height > 4) 4 else label_row + 1;
-    const text = editor.asSlice();
+    const text = editor.taskSlice();
     const text_style: vaxis.Style = .{};
 
     var text_col: u16 = 2;
@@ -636,8 +834,7 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         text_col += 1;
     }
 
-    // simple cursor indicator: underscore after current cursor position
-    if (editor.mode == .insert and text_col < win.width) {
+    if (editor.focus == .task and editor.mode == .insert and text_col < win.width) {
         const cursor = "_"[0..1];
         _ = win.writeCell(text_col, text_row, .{
             .char = .{ .grapheme = cursor, .width = 1 },
@@ -645,16 +842,33 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         });
     }
 
+    // meta panel: a rectangular container + the three fields.
+    if (term_height > text_row + 4 and win.width > 6) {
+        const top: u16 = text_row + 2;
+        const bottom: u16 = top + 2; // 3-row box
+        const left: u16 = 1;
+        const right: u16 = win.width - 2;
+
+        const box_style: vaxis.Style = .{
+            .fg = .{ .rgb = .{ 150, 150, 150 } },
+        };
+
+        drawRect(win, left, top, right, bottom, box_style);
+
+        // content row inside box
+        const meta_content_row: u16 = top + 1;
+        drawEditorMeta(win, meta_content_row, editor);
+    }
+
     // hints at bottom row (only when not in ":" command mode)
     if (term_height > 6 and !editor.cmd_active) {
-        const hint = "i: insert   :w save+quit   :q quit";
+        const hint = "i: insert   :w save+quit   :q quit   :p/:d/:r/:t focus meta fields";
         const hint_row: u16 = @intCast(term_height - 1);
         const hint_style: vaxis.Style = .{
             .fg = .{ .rgb = .{ 150, 150, 150 } },
         };
         drawCenteredText(win, hint_row, hint, hint_style);
     }
-
 
     // editor ":" command-line at the bottom when active
     if (editor.cmd_active and term_height > 0) {
@@ -868,6 +1082,7 @@ fn keyToAscii(key: vaxis.Key) ?u8 {
     }
     return null;
 }
+
 
 
 fn handleEditorKey(
