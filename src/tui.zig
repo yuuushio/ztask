@@ -39,6 +39,41 @@ const AppView = enum {
 };
 
 
+fn insertIntoBuffer(buf: []u8, len: *usize, cursor: *usize, ch: u8) void {
+    if (len.* >= buf.len) return;
+    if (cursor.* > len.*) cursor.* = len.*;
+
+    var i: usize = len.*;
+    while (i > cursor.*) : (i -= 1) {
+        buf[i] = buf[i - 1];
+    }
+    buf[cursor.*] = ch;
+    len.* += 1;
+    cursor.* += 1;
+}
+
+fn deleteBeforeInBuffer(buf: []u8, len: *usize, cursor: *usize) void {
+    if (cursor.* == 0 or len.* == 0) return;
+
+    var i: usize = cursor.* - 1;
+    while (i + 1 < len.*) : (i += 1) {
+        buf[i] = buf[i + 1];
+    }
+    len.* -= 1;
+    cursor.* -= 1;
+}
+
+fn moveCursorInBuffer(len: usize, cursor: *usize, delta: i32) void {
+    const cur = @as(i32, @intCast(cursor.*));
+    var next = cur + delta;
+
+    if (next < 0) next = 0;
+    const max = @as(i32, @intCast(len));
+    if (next > max) next = max;
+
+    cursor.* = @intCast(next);
+}
+
 
 const EditorState = struct {
     pub const Mode = enum {
