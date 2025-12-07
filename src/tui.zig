@@ -74,21 +74,43 @@ fn moveCursorInBuffer(len: usize, cursor: *usize, delta: i32) void {
     cursor.* = @intCast(next);
 }
 
-
 const EditorState = struct {
     pub const Mode = enum {
         normal,
         insert,
     };
 
+    pub const Field = enum {
+        task,
+        priority,
+        due,
+        repeat,
+    };
+
     mode: Mode = .insert,
+    focus: Field = .task,
 
     // main single-line task text
     buf: [512]u8 = undefined,
     len: usize = 0,
     cursor: usize = 0,
 
-    // ":" command-line inside the editor, e.g. "w", "q", "wq"
+    // priority, edited as a tiny string, parsed to u8 on save
+    prio_buf: [4]u8 = undefined,
+    prio_len: usize = 0,
+    prio_cursor: usize = 0,
+
+    // due date string
+    due_buf: [64]u8 = undefined,
+    due_len: usize = 0,
+    due_cursor: usize = 0,
+
+    // repeat rule string
+    repeat_buf: [64]u8 = undefined,
+    repeat_len: usize = 0,
+    repeat_cursor: usize = 0,
+
+    // ":" command-line inside the editor
     cmd_active: bool = false,
     cmd_buf: [32]u8 = undefined,
     cmd_len: usize = 0,
@@ -96,15 +118,73 @@ const EditorState = struct {
     pub fn init() EditorState {
         return .{
             .mode = .insert,
+            .focus = .task,
+
+            .buf = undefined,
             .len = 0,
             .cursor = 0,
+
+            .prio_buf = undefined,
+            .prio_len = 0,
+            .prio_cursor = 0,
+
+            .due_buf = undefined,
+            .due_len = 0,
+            .due_cursor = 0,
+
+            .repeat_buf = undefined,
+            .repeat_len = 0,
+            .repeat_cursor = 0,
+
             .cmd_active = false,
+            .cmd_buf = undefined,
             .cmd_len = 0,
         };
     }
 
+    // main task text
     pub fn asSlice(self: *const EditorState) []const u8 {
         return self.buf[0..self.len];
+    }
+
+    pub fn taskSlice(self: *const EditorState) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn prioSlice(self: *const EditorState) []const u8 {
+        return self.prio_buf[0..self.prio_len];
+    }
+
+    pub fn dueSlice(self: *const EditorState) []const u8 {
+        return self.due_buf[0..self.due_len];
+    }
+
+    pub fn repeatSlice(self: *const EditorState) []const u8 {
+        return self.repeat_buf[0..self.repeat_len];
+    }
+
+    // parse priority text into u8 (empty or invalid => 0)
+    pub fn priorityValue(self: *const EditorState) u8 {
+        const s = self.prioSlice();
+        if (s.len == 0) return 0;
+
+        var i: usize = 0;
+        var v: u16 = 0;
+        var saw_digit = false;
+
+        while (i < s.len) : (i += 1) {
+            const b = s[i];
+            if (b < '0' or b > '9') break;
+            saw_digit = true;
+            v = v * 10 + (b - '0');
+            if (v > 255) {
+                v = 255;
+                break;
+            }
+        }
+
+        if (!saw_digit) return 0;
+        return @intCast(v);
     }
 
     pub fn cmdSlice(self: *const EditorState) []const u8 {
@@ -116,47 +196,51 @@ const EditorState = struct {
         self.cmd_len = 0;
     }
 
-    pub fn insertChar(self: *EditorState, ch: u8) void {
-        if (self.len >= self.buf.len) return;
-        if (self.cursor > self.len) self.cursor = self.len;
+    // Editing APIs now respect focus.
 
-        var i: usize = self.len;
-        while (i > self.cursor) : (i -= 1) {
-            self.buf[i] = self.buf[i - 1];
+    pub fn insertChar(self: *EditorState, ch: u8) void {
+        switch (self.focus) {
+            .task => insertIntoBuffer(self.buf[0..], &self.len, &self.cursor, ch),
+            .priority => insertIntoBuffer(self.prio_buf[0..], &self.prio_len, &self.prio_cursor, ch),
+            .due => insertIntoBuffer(self.due_buf[0..], &self.due_len, &self.due_cursor, ch),
+            .repeat => insertIntoBuffer(self.repeat_buf[0..], &self.repeat_len, &self.repeat_cursor, ch),
         }
-        self.buf[self.cursor] = ch;
-        self.len += 1;
-        self.cursor += 1;
     }
 
     pub fn deleteBeforeCursor(self: *EditorState) void {
-        if (self.cursor == 0 or self.len == 0) return;
-
-        var i: usize = self.cursor - 1;
-        while (i + 1 < self.len) : (i += 1) {
-            self.buf[i] = self.buf[i + 1];
+        switch (self.focus) {
+            .task => deleteBeforeInBuffer(self.buf[0..], &self.len, &self.cursor),
+            .priority => deleteBeforeInBuffer(self.prio_buf[0..], &self.prio_len, &self.prio_cursor),
+            .due => deleteBeforeInBuffer(self.due_buf[0..], &self.due_len, &self.due_cursor),
+            .repeat => deleteBeforeInBuffer(self.repeat_buf[0..], &self.repeat_len, &self.repeat_cursor),
         }
-        self.len -= 1;
-        self.cursor -= 1;
     }
 
     pub fn moveCursor(self: *EditorState, delta: i32) void {
-        const cur = @as(i32, @intCast(self.cursor));
-        var next = cur + delta;
-
-        if (next < 0) next = 0;
-        const max = @as(i32, @intCast(self.len));
-        if (next > max) next = max;
-
-        self.cursor = @intCast(next);
+        switch (self.focus) {
+            .task => moveCursorInBuffer(self.len, &self.cursor, delta),
+            .priority => moveCursorInBuffer(self.prio_len, &self.prio_cursor, delta),
+            .due => moveCursorInBuffer(self.due_len, &self.due_cursor, delta),
+            .repeat => moveCursorInBuffer(self.repeat_len, &self.repeat_cursor, delta),
+        }
     }
 
     pub fn moveToStart(self: *EditorState) void {
-        self.cursor = 0;
+        switch (self.focus) {
+            .task => self.cursor = 0,
+            .priority => self.prio_cursor = 0,
+            .due => self.due_cursor = 0,
+            .repeat => self.repeat_cursor = 0,
+        }
     }
 
     pub fn moveToEnd(self: *EditorState) void {
-        self.cursor = self.len;
+        switch (self.focus) {
+            .task => self.cursor = self.len,
+            .priority => self.prio_cursor = self.prio_len,
+            .due => self.due_cursor = self.due_len,
+            .repeat => self.repeat_cursor = self.repeat_len,
+        }
     }
 };
 
