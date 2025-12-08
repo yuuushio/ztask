@@ -760,117 +760,150 @@ fn drawLabelContainer(
 }
 
 
-fn drawMetaFieldBox(
+fn drawTaskLine(
     win: vaxis.Window,
-    top: u16,
-    label_col: u16,
-    box_left: u16,
-    label: []const u8,
-    value: []const u8,
-    cursor_index: usize,
-    focused: bool,
-    show_cursor: bool,
+    row: u16,
+    editor: *const EditorState,
 ) void {
-    if (top + 2 >= win.height) return;
+    const text = editor.taskSlice();
+    const term_width: u16 = win.width;
+    if (term_width <= 2) return;
 
     const base_style: vaxis.Style = .{};
-    const focus_style: vaxis.Style = .{
+    const cursor_style: vaxis.Style = .{
         .bold = true,
-        .fg = .{ .rgb = .{ 220, 220, 255 } },
+        .reverse = true,
     };
-    const style = if (focused) focus_style else base_style;
 
-    const mid_row: u16 = top + 1;
+    const cursor_pos: usize = editor.cursor;
 
-    // Draw label text at fixed column, but never past the join column.
-    var col: u16 = label_col;
+    var col: u16 = 2;
     var i: usize = 0;
-    while (i < label.len and col < win.width and col < box_left) : (i += 1) {
-        const g = label[i .. i + 1];
-        _ = win.writeCell(col, mid_row, .{
+    while (i < text.len and col < term_width) : (i += 1) {
+        const g = text[i .. i + 1];
+        const style = if (editor.focus == .task and cursor_pos == i)
+            cursor_style
+        else
+            base_style;
+
+        _ = win.writeCell(col, row, .{
             .char = .{ .grapheme = g, .width = 1 },
             .style = style,
         });
         col += 1;
     }
 
-    if (col < win.width and col < box_left) {
+    // Cursor at end of line -> highlighted space cell.
+    if (editor.focus == .task and cursor_pos == text.len and col < term_width) {
+        const space = " "[0..1];
+        _ = win.writeCell(col, row, .{
+            .char = .{ .grapheme = space, .width = 1 },
+            .style = cursor_style,
+        });
+    }
+}
+
+fn drawMetaFieldBox(
+    win: vaxis.Window,
+    top: u16,
+    label_field_width: u16,
+    label: []const u8,
+    value: []const u8,
+    cursor_pos: usize,
+    focused: bool,
+) void {
+    if (top + 2 >= win.height) return;
+    if (label_field_width + 3 >= win.width) return;
+
+    const base_style: vaxis.Style = .{};
+    const label_focus_style: vaxis.Style = .{
+        .bold = true,
+    };
+    const cursor_style: vaxis.Style = .{
+        .bold = true,
+        .reverse = true,
+    };
+
+    const label_style = if (focused) label_focus_style else base_style;
+
+    const mid_row: u16 = top + 1;
+
+    // draw "label:" left box like you already do
+    var col: u16 = 2;
+    var i: usize = 0;
+    while (i < label.len and col < win.width and col < label_field_width) : (i += 1) {
+        const g = label[i .. i + 1];
+        _ = win.writeCell(col, mid_row, .{
+            .char = .{ .grapheme = g, .width = 1 },
+            .style = label_style,
+        });
+        col += 1;
+    }
+    if (col < win.width and col < label_field_width) {
         const colon = ":"[0..1];
         _ = win.writeCell(col, mid_row, .{
             .char = .{ .grapheme = colon, .width = 1 },
-            .style = style,
-        });
-        col += 1;
-    }
-    if (col < win.width and col < box_left) {
-        const space = " "[0..1];
-        _ = win.writeCell(col, mid_row, .{
-            .char = .{ .grapheme = space, .width = 1 },
-            .style = style,
+            .style = label_style,
         });
         col += 1;
     }
 
-    // Value box sizing, same logic as before.
-    if (box_left + 3 >= win.width) return;
+    // space before box
+    if (col < win.width and col < label_field_width) {
+        const sp = " "[0..1];
+        _ = win.writeCell(col, mid_row, .{
+            .char = .{ .grapheme = sp, .width = 1 },
+            .style = base_style,
+        });
+        col += 1;
+    }
+
 
     const min_inner: usize = 8;
-
     var inner_w: usize = value.len;
-    if (show_cursor) inner_w += 1;
     if (inner_w < min_inner) inner_w = min_inner;
 
-    const available: usize = @intCast(win.width - box_left);
+    const available: usize = @intCast(win.width - label_field_width);
     if (available <= 3) return;
 
     const max_inner: usize = available - 2;
     if (inner_w > max_inner) inner_w = max_inner;
 
     const total_w: u16 = @intCast(inner_w + 2);
-    const box_right: u16 = box_left + total_w - 1;
+    const box_right: u16 = label_field_width + total_w - 1;
     if (box_right >= win.width) return;
 
     const box_bottom: u16 = top + 2;
 
-    // First draw the value box with plain corners.
-    drawRect(win, box_left, top, box_right, box_bottom, style);
+    drawRect(win, label_field_width, top, box_right, box_bottom, base_style);
 
-    // Then draw the label container so its right corner overwrites
-    // the value box's top-left / bottom-left with ┬ and ┴.
-    const label_box_left: u16 = if (label_col > 0) label_col - 1 else 0;
-    if (label_box_left + 2 <= box_left and label_box_left < win.width) {
-        drawLabelContainer(win, label_box_left, top, box_left, box_bottom, style);
-    }
-
-    var val_col: u16 = box_left + 1;
+    // contents
+    var val_col: u16 = label_field_width + 1;
     const val_row: u16 = mid_row;
 
     i = 0;
-    while (i < value.len and i < inner_w and val_col < box_right) : (i += 1) {
+    while (i < value.len and val_col < box_right) : (i += 1) {
         const g = value[i .. i + 1];
+        const style_for_cell =
+            if (focused and cursor_pos == i) cursor_style else base_style;
+
         _ = win.writeCell(val_col, val_row, .{
             .char = .{ .grapheme = g, .width = 1 },
-            .style = style,
+            .style = style_for_cell,
         });
         val_col += 1;
     }
 
-    // Cursor inside the box, driven by cursor_index.
-    if (show_cursor) {
-        var pos: usize = cursor_index;
-        if (pos > inner_w) pos = inner_w;
-
-        const pos_u16: u16 = @intCast(pos);
-        const cur_col: u16 = box_left + 1 + pos_u16;
-        if (cur_col < box_right) {
-            const cursor = "_"[0..1];
-            _ = win.writeCell(cur_col, val_row, .{
-                .char = .{ .grapheme = cursor, .width = 1 },
-                .style = style,
-            });
-        }
+    // cursor at end of value -> highlight trailing space
+    if (focused and cursor_pos == value.len and val_col < box_right) {
+        const space = " "[0..1];
+        _ = win.writeCell(val_col, val_row, .{
+            .char = .{ .grapheme = space, .width = 1 },
+            .style = cursor_style,
+        });
     }
 }
+
 
 
 fn drawEditorMeta(
@@ -894,57 +927,48 @@ fn drawEditorMeta(
     if (rep_len > max_label_len) max_label_len = rep_len;
 
     // label_col + max_label + ":" + space
-    const box_left: u16 = label_col + max_label_len + 2;
-    if (box_left + 3 >= win.width) return;
+    const label_field_width: u16 = label_col + max_label_len + 2;
+    if (label_field_width + 3 >= win.width) return;
 
-    var top: u16 = first_top;
+    var top = first_top;
 
-    // priority
     if (top + 2 < term_height) {
         drawMetaFieldBox(
             win,
             top,
-            label_col,
-            box_left,
-            l_prio,
+            label_field_width,
+            "prio",
             editor.prioSlice(),
             editor.prio_cursor,
             editor.focus == .priority,
-            editor.focus == .priority and editor.mode == .insert,
         );
     }
     top += 3;
     if (top >= term_height) return;
 
-    // due
     if (top + 2 < term_height) {
         drawMetaFieldBox(
             win,
             top,
-            label_col,
-            box_left,
-            l_due,
+            label_field_width,
+            "due",
             editor.dueSlice(),
             editor.due_cursor,
             editor.focus == .due,
-            editor.focus == .due and editor.mode == .insert,
         );
     }
     top += 3;
     if (top >= term_height) return;
 
-    // repeat
     if (top + 2 < term_height) {
         drawMetaFieldBox(
             win,
             top,
-            label_col,
-            box_left,
-            l_repeat,
+            label_field_width,
+            "repeat",
             editor.repeatSlice(),
             editor.repeat_cursor,
             editor.focus == .repeat,
-            editor.focus == .repeat and editor.mode == .insert,
         );
     }
 }
@@ -1018,24 +1042,26 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         text_col += 1;
     }
 
-    if (editor.focus == .task) {
-        var cursor_col: u16 = 2;
-        var idx: usize = 0;
-        const cursor_index = editor.cursor;
+    drawTaskLine(win, text_row, editor);
 
-        // advance one column per byte until cursor_index
-        while (idx < cursor_index and cursor_col < win.width) : (idx += 1) {
-            cursor_col += 1;
-        }
-
-        if (cursor_col < win.width) {
-            const cursor = "_"[0..1];
-            _ = win.writeCell(cursor_col, text_row, .{
-                .char = .{ .grapheme = cursor, .width = 1 },
-                .style = text_style,
-            });
-        }
-    }
+    // if (editor.focus == .task) {
+    //     var cursor_col: u16 = 2;
+    //     var idx: usize = 0;
+    //     const cursor_index = editor.cursor;
+    //
+    //     // advance one column per byte until cursor_index
+    //     while (idx < cursor_index and cursor_col < win.width) : (idx += 1) {
+    //         cursor_col += 1;
+    //     }
+    //
+    //     if (cursor_col < win.width) {
+    //         const cursor = "_"[0..1];
+    //         _ = win.writeCell(cursor_col, text_row, .{
+    //             .char = .{ .grapheme = cursor, .width = 1 },
+    //             .style = text_style,
+    //         });
+    //     }
+    // }
 
     if (term_height > text_row + 2 and win.width > 10) {
         const meta_top: u16 = text_row + 2;
