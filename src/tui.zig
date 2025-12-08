@@ -74,6 +74,18 @@ fn moveCursorInBuffer(len: usize, cursor: *usize, delta: i32) void {
     cursor.* = @intCast(next);
 }
 
+
+fn moveCursorImpl(cur: *usize, len: usize, delta: i32) void {
+    const cur_i: i32 = @intCast(cur.*);
+    var next = cur_i + delta;
+
+    if (next < 0) next = 0;
+    const max: i32 = @intCast(len);
+    if (next > max) next = max;
+
+    cur.* = @intCast(next);
+}
+
 const EditorState = struct {
     pub const Mode = enum {
         normal,
@@ -218,10 +230,10 @@ const EditorState = struct {
 
     pub fn moveCursor(self: *EditorState, delta: i32) void {
         switch (self.focus) {
-            .task => moveCursorInBuffer(self.len, &self.cursor, delta),
-            .priority => moveCursorInBuffer(self.prio_len, &self.prio_cursor, delta),
-            .due => moveCursorInBuffer(self.due_len, &self.due_cursor, delta),
-            .repeat => moveCursorInBuffer(self.repeat_len, &self.repeat_cursor, delta),
+            .task => moveCursorImpl(&self.cursor, self.len, delta),
+            .priority => moveCursorImpl(&self.prio_cursor, self.prio_len, delta),
+            .due => moveCursorImpl(&self.due_cursor, self.due_len, delta),
+            .repeat => moveCursorImpl(&self.repeat_cursor, self.repeat_len, delta),
         }
     }
 
@@ -755,6 +767,7 @@ fn drawMetaFieldBox(
     box_left: u16,
     label: []const u8,
     value: []const u8,
+    cursor_index: usize,
     focused: bool,
     show_cursor: bool,
 ) void {
@@ -829,12 +842,11 @@ fn drawMetaFieldBox(
         drawLabelContainer(win, label_box_left, top, box_left, box_bottom, style);
     }
 
-    // Finally, put the value text (and cursor) inside the value box.
     var val_col: u16 = box_left + 1;
     const val_row: u16 = mid_row;
 
     i = 0;
-    while (i < value.len and val_col < box_right) : (i += 1) {
+    while (i < value.len and i < inner_w and val_col < box_right) : (i += 1) {
         const g = value[i .. i + 1];
         _ = win.writeCell(val_col, val_row, .{
             .char = .{ .grapheme = g, .width = 1 },
@@ -843,12 +855,20 @@ fn drawMetaFieldBox(
         val_col += 1;
     }
 
-    if (show_cursor and val_col < box_right) {
-        const cursor = "_"[0..1];
-        _ = win.writeCell(val_col, val_row, .{
-            .char = .{ .grapheme = cursor, .width = 1 },
-            .style = style,
-        });
+    // Cursor inside the box, driven by cursor_index.
+    if (show_cursor) {
+        var pos: usize = cursor_index;
+        if (pos > inner_w) pos = inner_w;
+
+        const pos_u16: u16 = @intCast(pos);
+        const cur_col: u16 = box_left + 1 + pos_u16;
+        if (cur_col < box_right) {
+            const cursor = "_"[0..1];
+            _ = win.writeCell(cur_col, val_row, .{
+                .char = .{ .grapheme = cursor, .width = 1 },
+                .style = style,
+            });
+        }
     }
 }
 
@@ -888,6 +908,7 @@ fn drawEditorMeta(
             box_left,
             l_prio,
             editor.prioSlice(),
+            editor.prio_cursor,
             editor.focus == .priority,
             editor.focus == .priority and editor.mode == .insert,
         );
@@ -904,6 +925,7 @@ fn drawEditorMeta(
             box_left,
             l_due,
             editor.dueSlice(),
+            editor.due_cursor,
             editor.focus == .due,
             editor.focus == .due and editor.mode == .insert,
         );
@@ -920,6 +942,7 @@ fn drawEditorMeta(
             box_left,
             l_repeat,
             editor.repeatSlice(),
+            editor.repeat_cursor,
             editor.focus == .repeat,
             editor.focus == .repeat and editor.mode == .insert,
         );
@@ -995,12 +1018,23 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         text_col += 1;
     }
 
-    if (editor.focus == .task and editor.mode == .insert and text_col < win.width) {
-        const cursor = "_"[0..1];
-        _ = win.writeCell(text_col, text_row, .{
-            .char = .{ .grapheme = cursor, .width = 1 },
-            .style = text_style,
-        });
+    if (editor.focus == .task) {
+        var cursor_col: u16 = 2;
+        var idx: usize = 0;
+        const cursor_index = editor.cursor;
+
+        // advance one column per byte until cursor_index
+        while (idx < cursor_index and cursor_col < win.width) : (idx += 1) {
+            cursor_col += 1;
+        }
+
+        if (cursor_col < win.width) {
+            const cursor = "_"[0..1];
+            _ = win.writeCell(cursor_col, text_row, .{
+                .char = .{ .grapheme = cursor, .width = 1 },
+                .style = text_style,
+            });
+        }
     }
 
     if (term_height > text_row + 2 and win.width > 10) {
@@ -1349,11 +1383,32 @@ fn handleEditorKey(
                 editor.mode = .insert;
                 return;
             }
+
+            if (key.matches('i', .{})) {
+                // insert at current cursor
+                editor.mode = .insert;
+                return;
+            }
+            if (key.matches('I', .{})) {
+                // go to start, then insert
+                editor.moveToStart();
+                editor.mode = .insert;
+                return;
+            }
             if (key.matches('a', .{})) {
+                // append after current position
+                editor.moveCursor(1);
+                editor.mode = .insert;
+                return;
+            }
+            if (key.matches('A', .{})) {
+                // go to end, then insert
                 editor.moveToEnd();
                 editor.mode = .insert;
                 return;
             }
+
+            // horizontal motions
             if (key.matches('h', .{})) {
                 editor.moveCursor(-1);
                 return;
@@ -1362,6 +1417,8 @@ fn handleEditorKey(
                 editor.moveCursor(1);
                 return;
             }
+
+            // line boundary motions
             if (key.matches('0', .{})) {
                 editor.moveToStart();
                 return;
