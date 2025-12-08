@@ -960,7 +960,18 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
     const label_row: u16 = if (term_height > 3) 3 else 1;
     col = 2;
     i = 0;
-    const label_style: vaxis.Style = .{};
+
+    const base_style: vaxis.Style = .{};
+    const focus_style: vaxis.Style = .{
+        .bold = true,
+        .fg = .{ .rgb = .{ 220, 220, 255 } },
+    };
+
+    const label_style: vaxis.Style =
+        if (editor.focus == .task) focus_style else base_style;
+    const text_style: vaxis.Style =
+        if (editor.focus == .task) focus_style else base_style;
+
     while (i < label.len and col < win.width) : (i += 1) {
         const g = label[i .. i + 1];
         _ = win.writeCell(col, label_row, .{
@@ -972,7 +983,6 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
 
     const text_row: u16 = if (term_height > 4) 4 else label_row + 1;
     const text = editor.taskSlice();
-    const text_style: vaxis.Style = .{};
 
     var text_col: u16 = 2;
     i = 0;
