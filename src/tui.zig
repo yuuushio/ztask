@@ -102,6 +102,11 @@ const EditorState = struct {
     mode: Mode = .insert,
     focus: Field = .task,
 
+    // new task vs editing existing task
+    is_new: bool = true,
+    editing_status: store.Status = .todo,
+    editing_index: usize = 0,
+
     // main single-line task text
     buf: [512]u8 = undefined,
     len: usize = 0,
@@ -127,10 +132,14 @@ const EditorState = struct {
     cmd_buf: [32]u8 = undefined,
     cmd_len: usize = 0,
 
-    pub fn init() EditorState {
+    pub fn initNew() EditorState {
         return .{
             .mode = .insert,
             .focus = .task,
+
+            .is_new = true,
+            .editing_status = store.Status.todo,
+            .editing_index = 0,
 
             .buf = undefined,
             .len = 0,
@@ -152,6 +161,64 @@ const EditorState = struct {
             .cmd_buf = undefined,
             .cmd_len = 0,
         };
+    }
+
+    // keep the old name for callers that still use .init()
+    pub fn init() EditorState {
+        return EditorState.initNew();
+    }
+
+    /// Build an editor pre-filled from an existing task.
+    pub fn fromTask(task: store.Task) EditorState {
+        var self = EditorState.initNew();
+        self.is_new = false;
+        self.editing_status = task.status;
+
+        // text
+        const text_len = @min(task.text.len, self.buf.len);
+        if (text_len != 0) {
+            @memcpy(self.buf[0..text_len], task.text[0..text_len]);
+        }
+        self.len = text_len;
+        self.cursor = text_len;
+
+        // priority -> ascii
+        if (task.priority != 0) {
+            var tmp: [3]u8 = undefined;
+            var n: u16 = task.priority;
+            var digits: usize = 0;
+
+            while (n != 0 and digits < tmp.len) : (n /= 10) {
+                const d: u8 = @intCast(n % 10);
+                tmp[digits] = '0' + d;
+                digits += 1;
+            }
+
+            var j: usize = 0;
+            while (j < digits) : (j += 1) {
+                self.prio_buf[j] = tmp[digits - 1 - j];
+            }
+            self.prio_len = digits;
+            self.prio_cursor = digits;
+        }
+
+        // due
+        const due_len = @min(task.due.len, self.due_buf.len);
+        if (due_len != 0) {
+            @memcpy(self.due_buf[0..due_len], task.due[0..due_len]);
+            self.due_len = due_len;
+            self.due_cursor = due_len;
+        }
+
+        // repeat
+        const rep_len = @min(task.repeat.len, self.repeat_buf.len);
+        if (rep_len != 0) {
+            @memcpy(self.repeat_buf[0..rep_len], task.repeat[0..rep_len]);
+            self.repeat_len = rep_len;
+            self.repeat_cursor = rep_len;
+        }
+
+        return self;
     }
 
     // main task text
