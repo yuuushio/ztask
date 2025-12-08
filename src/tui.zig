@@ -242,6 +242,45 @@ const EditorState = struct {
             .repeat => self.repeat_cursor = self.repeat_len,
         }
     }
+
+
+    pub fn setFocus(self: *EditorState, field: Field) void {
+        self.focus = field;
+        switch (field) {
+            .task => {
+                if (self.cursor > self.len) self.cursor = self.len;
+            },
+            .priority => {
+                if (self.prio_cursor > self.prio_len) self.prio_cursor = self.prio_len;
+            },
+            .due => {
+                if (self.due_cursor > self.due_len) self.due_cursor = self.due_len;
+            },
+            .repeat => {
+                if (self.repeat_cursor > self.repeat_len) self.repeat_cursor = self.repeat_len;
+            },
+        }
+    }
+
+    pub fn focusNext(self: *EditorState) void {
+        const next: Field = switch (self.focus) {
+            .task => .priority,
+            .priority => .due,
+            .due => .repeat,
+            .repeat => .task,
+        };
+        self.setFocus(next);
+    }
+
+    pub fn focusPrev(self: *EditorState) void {
+        const prev: Field = switch (self.focus) {
+            .task => .repeat,
+            .priority => .task,
+            .due => .priority,
+            .repeat => .due,
+        };
+        self.setFocus(prev);
+    }
 };
 
 /// First row used for the task list (0 = header, 2 = counts, 3 blank).
@@ -1286,40 +1325,40 @@ fn handleEditorKey(
 
     switch (editor.mode) {
         .normal => {
+            // vertical focus cycling between fields
+            if (key.matches('j', .{})) {
+                editor.focusNext();
+                return;
+            }
+            if (key.matches('k', .{})) {
+                editor.focusPrev();
+                return;
+            }
+
             if (key.matches('i', .{})) {
                 editor.mode = .insert;
                 return;
             }
-
             if (key.matches('a', .{})) {
-                switch (editor.focus) {
-                    .task => editor.moveToEnd(),
-                    .priority => editor.prio_cursor = editor.prio_len,
-                    .due => editor.due_cursor = editor.due_len,
-                    .repeat => editor.repeat_cursor = editor.repeat_len,
-                }
+                editor.moveToEnd();
                 editor.mode = .insert;
                 return;
             }
-
-            // Vim motions only make sense on the main text for now.
-            if (editor.focus == .task) {
-                if (key.matches('h', .{})) {
-                    editor.moveCursor(-1);
-                    return;
-                }
-                if (key.matches('l', .{})) {
-                    editor.moveCursor(1);
-                    return;
-                }
-                if (key.matches('0', .{})) {
-                    editor.moveToStart();
-                    return;
-                }
-                if (key.matches('$', .{})) {
-                    editor.moveToEnd();
-                    return;
-                }
+            if (key.matches('h', .{})) {
+                editor.moveCursor(-1);
+                return;
+            }
+            if (key.matches('l', .{})) {
+                editor.moveCursor(1);
+                return;
+            }
+            if (key.matches('0', .{})) {
+                editor.moveToStart();
+                return;
+            }
+            if (key.matches('$', .{})) {
+                editor.moveToEnd();
+                return;
             }
         },
         .insert => {
