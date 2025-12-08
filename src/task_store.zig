@@ -791,3 +791,24 @@ pub fn rewriteJsonFileWithoutIndex(
         try writeJsonLineForTask(allocator, file, tasks[i]);
     }
 }
+
+
+pub fn rewriteJsonFileReplacingIndex(
+    allocator: mem.Allocator,
+    file: *fs.File,
+    tasks: []const Task,
+    replace_index: usize,
+    replacement: Task,
+) !void {
+    try file.seekTo(0);
+    try file.setEndPos(0);
+
+    var i: usize = 0;
+    while (i < tasks.len) : (i += 1) {
+        if (i == replace_index) {
+            try writeJsonLineForTask(allocator, file, replacement);
+        } else {
+            try writeJsonLineForTask(allocator, file, tasks[i]);
+        }
+    }
+}
