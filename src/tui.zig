@@ -383,6 +383,7 @@ pub fn run(
     var list_cmd_active = false;
     var list_cmd_new = false;
     var list_cmd_done = false;
+    var list_cmd_edit = false;
 
 
     var loop: vaxis.Loop(Event) = .{
@@ -427,6 +428,7 @@ pub fn run(
                                 &list_cmd_active,
                                 &list_cmd_new,
                                 &list_cmd_done,
+                                &list_cmd_edit,
                                 ctx,
                                 allocator,
                                 ui,
@@ -1200,6 +1202,7 @@ fn handleListCommandKey(
     list_cmd_active: *bool,
     list_cmd_new: *bool,
     list_cmd_done: *bool,
+    list_cmd_edit: *bool,
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
     ui: *UiState,
@@ -1228,6 +1231,8 @@ fn handleListCommandKey(
         } else if (list_cmd_done.*) {
             // ":d" -> mark current TODO task as DONE
             try markDone(ctx, allocator, ui);
+        } else if (list_cmd_edit.*){
+            try beginEditSelectedTask(ctx,ui,editor,view);
         }
         list_cmd_active.* = false;
         list_cmd_new.* = false;
@@ -1246,7 +1251,44 @@ fn handleListCommandKey(
         list_cmd_new.* = false;
         return;
     }
+    if (key.matches('e', .{})){
+        list_cmd_edit.* = true;
+        list_cmd_new.* = false;
+        list_cmd_done.* = false;
+        return;
+    }
 }
+
+
+fn beginEditSelectedTask(
+    ctx: *TuiContext,
+    ui: *UiState,
+    editor: *EditorState,
+    view: *AppView,
+) !void {
+    const tasks: []const Task = switch (ui.focus) {
+        .todo => ctx.index.todoSlice(),
+        .done => ctx.index.doneSlice(),
+    };
+    if (tasks.len == 0) return;
+
+    var list_view = ui.activeView();
+    if (list_view.selected_index >= tasks.len) {
+        list_view.selected_index = tasks.len - 1;
+    }
+    const sel = list_view.selected_index;
+
+    const t = tasks[sel];
+
+    var e = EditorState.fromTask(t);
+    e.editing_index = sel;
+    // if legacy data has weird status, force by focus
+    e.editing_status = if (ui.focus == .done) store.Status.done else store.Status.todo;
+
+    editor.* = e;
+    view.* = .editor;
+}
+
 
 
 fn markDone(
