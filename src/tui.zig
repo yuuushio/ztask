@@ -696,10 +696,12 @@ fn drawMetaFieldBox(
 
     const box_left: u16 = col;
 
+    const min_inner: usize=8;
+
     // Interior width grows with value.len (+ cursor), but is clamped to fit.
     var inner_w: usize = value.len;
-    if (inner_w == 0) inner_w = 1; // minimal visible box
     if (show_cursor) inner_w += 1;
+    if (inner_w < min_inner) inner_w = min_inner;
 
     const available: usize = @intCast(win.width - box_left);
     if (available <= 3) return; // not enough space for borders + 1 char
@@ -858,22 +860,9 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         });
     }
 
-    // meta panel: a rectangular container + the three fields.
-    if (term_height > text_row + 4 and win.width > 6) {
-        const top: u16 = text_row + 2;
-        const bottom: u16 = top + 2; // 3-row box
-        const left: u16 = 1;
-        const right: u16 = win.width - 2;
-
-        const box_style: vaxis.Style = .{
-            .fg = .{ .rgb = .{ 150, 150, 150 } },
-        };
-
-        drawRect(win, left, top, right, bottom, box_style);
-
-        // content row inside box
-        const meta_content_row: u16 = top + 1;
-        drawEditorMeta(win, meta_content_row, editor);
+    if (term_height > text_row + 2 and win.width > 10) {
+        const meta_top: u16 = text_row + 2;
+        drawEditorMeta(win, meta_top, editor);
     }
 
     // hints at bottom row (only when not in ":" command mode)
