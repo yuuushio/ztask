@@ -645,6 +645,8 @@ fn drawRect(
 fn drawMetaFieldBox(
     win: vaxis.Window,
     top: u16,
+    label_col: u16,
+    box_left: u16,
     label: []const u8,
     value: []const u8,
     focused: bool,
@@ -652,6 +654,7 @@ fn drawMetaFieldBox(
 ) void {
     // Each field uses 3 rows: top border, content, bottom border.
     if (top + 2 >= win.height) return;
+    if (box_left + 3 >= win.width) return; // not enough horizontal room
 
     const base_style: vaxis.Style = .{};
     const focus_style: vaxis.Style = .{
@@ -662,10 +665,10 @@ fn drawMetaFieldBox(
 
     const mid_row: u16 = top + 1;
 
-    // Draw label: "prio:", "due:", "repeat:"
-    var col: u16 = 2;
+    // Draw label at fixed label_col.
+    var col: u16 = label_col;
     var i: usize = 0;
-    while (i < label.len and col < win.width) : (i += 1) {
+    while (i < label.len and col < win.width and col < box_left) : (i += 1) {
         const g = label[i .. i + 1];
         _ = win.writeCell(col, mid_row, .{
             .char = .{ .grapheme = g, .width = 1 },
@@ -674,7 +677,8 @@ fn drawMetaFieldBox(
         col += 1;
     }
 
-    if (col < win.width) {
+    // Colon and space before the box, if there is room.
+    if (col < win.width and col < box_left) {
         const colon = ":"[0..1];
         _ = win.writeCell(col, mid_row, .{
             .char = .{ .grapheme = colon, .width = 1 },
@@ -682,7 +686,7 @@ fn drawMetaFieldBox(
         });
         col += 1;
     }
-    if (col < win.width) {
+    if (col < win.width and col < box_left) {
         const space = " "[0..1];
         _ = win.writeCell(col, mid_row, .{
             .char = .{ .grapheme = space, .width = 1 },
@@ -691,20 +695,15 @@ fn drawMetaFieldBox(
         col += 1;
     }
 
-    // Need at least 3 columns for a box: "|" " " "|".
-    if (col + 3 >= win.width) return;
+    // Box starts at fixed box_left, independent of label length.
+    const min_inner: usize = 8;
 
-    const box_left: u16 = col;
-
-    const min_inner: usize=8;
-
-    // Interior width grows with value.len (+ cursor), but is clamped to fit.
     var inner_w: usize = value.len;
     if (show_cursor) inner_w += 1;
     if (inner_w < min_inner) inner_w = min_inner;
 
     const available: usize = @intCast(win.width - box_left);
-    if (available <= 3) return; // not enough space for borders + 1 char
+    if (available <= 3) return;
 
     const max_inner: usize = available - 2;
     if (inner_w > max_inner) inner_w = max_inner;
@@ -715,10 +714,10 @@ fn drawMetaFieldBox(
 
     const box_bottom: u16 = top + 2;
 
-    // Outer rectangle (ASCII borders).
+    // Draw box.
     drawRect(win, box_left, top, box_right, box_bottom, style);
 
-    // Value inside the box.
+    // Draw value and cursor inside.
     var val_col: u16 = box_left + 1;
     const val_row: u16 = mid_row;
 
@@ -741,6 +740,7 @@ fn drawMetaFieldBox(
     }
 }
 
+
 fn drawEditorMeta(
     win: vaxis.Window,
     first_top: u16,
@@ -749,15 +749,32 @@ fn drawEditorMeta(
     const term_height: u16 = win.height;
     if (first_top >= term_height) return;
 
-    // Each field consumes 3 rows (top border, middle, bottom border).
-    var top = first_top;
+    const label_col: u16 = 2;
+
+    const l_prio = "prio";
+    const l_due = "due";
+    const l_repeat = "repeat";
+
+    var max_label_len: u16 = @intCast(l_prio.len);
+    const due_len: u16 = @intCast(l_due.len);
+    if (due_len > max_label_len) max_label_len = due_len;
+    const rep_len: u16 = @intCast(l_repeat.len);
+    if (rep_len > max_label_len) max_label_len = rep_len;
+
+    // label_col + max_label + ":" + space
+    const box_left: u16 = label_col + max_label_len + 2;
+    if (box_left + 3 >= win.width) return;
+
+    var top: u16 = first_top;
 
     // priority
     if (top + 2 < term_height) {
         drawMetaFieldBox(
             win,
             top,
-            "prio",
+            label_col,
+            box_left,
+            l_prio,
             editor.prioSlice(),
             editor.focus == .priority,
             editor.focus == .priority and editor.mode == .insert,
@@ -771,7 +788,9 @@ fn drawEditorMeta(
         drawMetaFieldBox(
             win,
             top,
-            "due",
+            label_col,
+            box_left,
+            l_due,
             editor.dueSlice(),
             editor.focus == .due,
             editor.focus == .due and editor.mode == .insert,
@@ -785,7 +804,9 @@ fn drawEditorMeta(
         drawMetaFieldBox(
             win,
             top,
-            "repeat",
+            label_col,
+            box_left,
+            l_repeat,
             editor.repeatSlice(),
             editor.focus == .repeat,
             editor.focus == .repeat and editor.mode == .insert,
