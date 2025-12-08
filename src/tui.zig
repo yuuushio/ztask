@@ -642,6 +642,73 @@ fn drawRect(
 }
 
 
+
+fn drawLabelContainer(
+    win: vaxis.Window,
+    left: u16,
+    top: u16,
+    right_incl: u16,
+    bottom_incl: u16,
+    style: vaxis.Style,
+) void {
+    if (left >= win.width or top >= win.height) return;
+
+    var right = right_incl;
+    var bottom = bottom_incl;
+    if (right >= win.width) right = win.width - 1;
+    if (bottom >= win.height) bottom = win.height - 1;
+    if (right <= left or bottom <= top) return;
+
+    const tl = "┌";
+    const tr = "┬";
+    const bl = "└";
+    const br = "┴";
+    const horiz = "─";
+    const vert = "│";
+
+    _ = win.writeCell(left, top, .{
+        .char = .{ .grapheme = tl, .width = 1 },
+        .style = style,
+    });
+    _ = win.writeCell(right, top, .{
+        .char = .{ .grapheme = tr, .width = 1 },
+        .style = style,
+    });
+    _ = win.writeCell(left, bottom, .{
+        .char = .{ .grapheme = bl, .width = 1 },
+        .style = style,
+    });
+    _ = win.writeCell(right, bottom, .{
+        .char = .{ .grapheme = br, .width = 1 },
+        .style = style,
+    });
+
+    var x: u16 = left + 1;
+    while (x < right) : (x += 1) {
+        _ = win.writeCell(x, top, .{
+            .char = .{ .grapheme = horiz, .width = 1 },
+            .style = style,
+        });
+        _ = win.writeCell(x, bottom, .{
+            .char = .{ .grapheme = horiz, .width = 1 },
+            .style = style,
+        });
+    }
+
+    var y: u16 = top + 1;
+    while (y < bottom) : (y += 1) {
+        _ = win.writeCell(left, y, .{
+            .char = .{ .grapheme = vert, .width = 1 },
+            .style = style,
+        });
+        _ = win.writeCell(right, y, .{
+            .char = .{ .grapheme = vert, .width = 1 },
+            .style = style,
+        });
+    }
+}
+
+
 fn drawMetaFieldBox(
     win: vaxis.Window,
     top: u16,
@@ -652,9 +719,7 @@ fn drawMetaFieldBox(
     focused: bool,
     show_cursor: bool,
 ) void {
-    // Each field uses 3 rows: top border, content, bottom border.
     if (top + 2 >= win.height) return;
-    if (box_left + 3 >= win.width) return; // not enough horizontal room
 
     const base_style: vaxis.Style = .{};
     const focus_style: vaxis.Style = .{
@@ -665,7 +730,7 @@ fn drawMetaFieldBox(
 
     const mid_row: u16 = top + 1;
 
-    // Draw label at fixed label_col.
+    // Draw label text at fixed column, but never past the join column.
     var col: u16 = label_col;
     var i: usize = 0;
     while (i < label.len and col < win.width and col < box_left) : (i += 1) {
@@ -677,7 +742,6 @@ fn drawMetaFieldBox(
         col += 1;
     }
 
-    // Colon and space before the box, if there is room.
     if (col < win.width and col < box_left) {
         const colon = ":"[0..1];
         _ = win.writeCell(col, mid_row, .{
@@ -695,7 +759,9 @@ fn drawMetaFieldBox(
         col += 1;
     }
 
-    // Box starts at fixed box_left, independent of label length.
+    // Value box sizing, same logic as before.
+    if (box_left + 3 >= win.width) return;
+
     const min_inner: usize = 8;
 
     var inner_w: usize = value.len;
@@ -714,10 +780,17 @@ fn drawMetaFieldBox(
 
     const box_bottom: u16 = top + 2;
 
-    // Draw box.
+    // First draw the value box with plain corners.
     drawRect(win, box_left, top, box_right, box_bottom, style);
 
-    // Draw value and cursor inside.
+    // Then draw the label container so its right corner overwrites
+    // the value box's top-left / bottom-left with ┬ and ┴.
+    const label_box_left: u16 = if (label_col > 0) label_col - 1 else 0;
+    if (label_box_left + 2 <= box_left and label_box_left < win.width) {
+        drawLabelContainer(win, label_box_left, top, box_left, box_bottom, style);
+    }
+
+    // Finally, put the value text (and cursor) inside the value box.
     var val_col: u16 = box_left + 1;
     const val_row: u16 = mid_row;
 
