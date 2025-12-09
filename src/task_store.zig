@@ -35,7 +35,8 @@ pub const Task = struct {
     status: Status,
 
     /// "" => no due date rule
-    due: []const u8,
+    due_date: []const u8,
+    due_time: []const u8,
     repeat: []const u8,
 
     /// Unix milliseconds since epoch, for sorting/grouping.
@@ -624,7 +625,17 @@ fn parseTaskFromJsonLine(
 ) ParseError!Task {
     // Core string fields
     const text_slice   = try parseStringField(line, "text",   true,  text_buf, cursor);
-    const due_slice    = try parseStringField(line, "due",    false, text_buf, cursor);
+
+    const due_date_slice    = try parseStringField(line, "due_date",    false, text_buf, cursor);
+    const legacy_due    = try parseStringField(line, "due",    false, text_buf, cursor);
+    const due_time_slice    = try parseStringField(line, "due_time",    false, text_buf, cursor);
+
+
+    if (due_date_slice.len == 0 and legacy_due.len != 0) {
+        // promote legacy "due" into new due_date
+        due_date_slice = legacy_due;
+    }
+
     const repeat_slice = try parseStringField(line, "repeat", false, text_buf, cursor);
 
     // Scalars
@@ -632,7 +643,6 @@ fn parseTaskFromJsonLine(
     const id_opt       = parseUnsignedField(line, "id");
     const created_opt  = parseSignedField(line, "created");
 
-    // Status; if field is malformed or absent, fall back to .todo
     const status_val = parseStatusField(line) catch Status.todo;
 
     // Shared empty slice sentinel out of text_buf
@@ -647,7 +657,8 @@ fn parseTaskFromJsonLine(
         .ctx_count  = 0,
         .priority   = prio_val,
         .status     = status_val,
-        .due        = if (due_slice.len != 0) due_slice else empty,
+        .due_date        = if (due_date_slice.len != 0) due_date_slice else empty,
+        .due        = if (due_time_slice.len != 0) due_time_slice else empty,
         .repeat     = if (repeat_slice.len != 0) repeat_slice else empty,
         .created_ms = created_opt orelse 0,
     };
@@ -720,11 +731,19 @@ fn writeJsonLineForTask(
     try w.writeAll(",\"priority\":");
     try w.print("{d}", .{task.priority});
 
-    try w.writeAll(",\"due\":");
-    if (task.due.len == 0) {
+
+    try w.writeAll(",\"due_date\":");
+    if (task.due_date.len == 0) {
         try w.writeAll("null");
     } else {
-        try writeJsonString(w, task.due);
+        try writeJsonString(w, task.due_date);
+    }
+
+    try w.writeAll(",\"due_time\":");
+    if (task.due_time.len == 0) {
+        try w.writeAll("null");
+    } else {
+        try writeJsonString(w, task.due_time);
     }
 
     try w.writeAll(",\"repeat\":");
