@@ -463,7 +463,7 @@ pub fn run(
                 drawHeader(win);
                 drawCounts(win, ctx.index, ui);
                 drawTodoList(win, ctx.index, ui, list_cmd_active);
-                drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done);
+                drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done, list_cmd_edit);
             },
             .editor => {
                 drawEditorView(win, &editor);
@@ -667,7 +667,14 @@ fn drawCounts(win: vaxis.Window, index: *const TaskIndex, ui: *const UiState) vo
     }
 }
 
-fn drawListCommandLine(win: vaxis.Window, active: bool, new_flag: bool, done_flag: bool) void {
+
+fn drawListCommandLine(
+    win: vaxis.Window,
+    active: bool,
+    new_flag: bool,
+    done_flag: bool,
+    edit_flag: bool,
+) void {
     if (!active or win.height == 0) return;
 
     const row: u16 = win.height - 1;
@@ -680,16 +687,20 @@ fn drawListCommandLine(win: vaxis.Window, active: bool, new_flag: bool, done_fla
     });
 
     if (win.width > 1) {
-        const ch = if (new_flag)
-            "n"
+        const ch: u8 = if (new_flag)
+            'n'
         else if (done_flag)
-            "d"
+            'd'
+        else if (edit_flag)
+            'e'
         else
-            " ";
+            ' ';
 
-        const ch_slice = ch[0..1];
+        const buf = [1]u8{ ch };
+        const slice = buf[0..1];
+
         _ = win.writeCell(1, row, .{
-            .char = .{ .grapheme = ch_slice, .width = 1 },
+            .char = .{ .grapheme = slice, .width = 1 },
             .style = style,
         });
     }
@@ -1212,6 +1223,7 @@ fn handleListCommandKey(
         list_cmd_active.* = false;
         list_cmd_new.* = false;
         list_cmd_done.* = false;
+        list_cmd_edit.* = false;
         return;
     }
 
@@ -1219,6 +1231,7 @@ fn handleListCommandKey(
     if (key.matches(vaxis.Key.backspace, .{})) {
         list_cmd_new.* = false;
         list_cmd_done.* = false;
+        list_cmd_edit.* = false;
         return;
     }
 
@@ -1237,6 +1250,7 @@ fn handleListCommandKey(
         list_cmd_active.* = false;
         list_cmd_new.* = false;
         list_cmd_done.* = false;
+        list_cmd_edit.* = false;
         return;
     }
 
@@ -1244,11 +1258,13 @@ fn handleListCommandKey(
     if (key.matches('n', .{})) {
         list_cmd_new.* = true;
         list_cmd_done.* = false;
+        list_cmd_edit.* = false;
         return;
     }
     if (key.matches('d', .{})) {
         list_cmd_done.* = true;
         list_cmd_new.* = false;
+        list_cmd_edit.* = false;
         return;
     }
     if (key.matches('e', .{})){
@@ -1290,6 +1306,92 @@ fn beginEditSelectedTask(
 }
 
 
+fn saveExistingTask(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    editor: *EditorState,
+    ui: *UiState,
+) !void {
+    const editing_status = editor.editing_status;
+
+    var file: fs.File = undefined;
+    const tasks: []const Task = switch (editing_status) {
+        .done => blk: {
+            file = ctx.done_file.*;
+            break :blk ctx.index.doneSlice();
+        },
+        else => blk: {
+            file = ctx.todo_file.*;
+            break :blk ctx.index.todoSlice();
+        },
+    };
+
+    if (tasks.len == 0) return;
+    if (editor.editing_index >= tasks.len) return;
+
+    const old = tasks[editor.editing_index];
+
+    const new_task: store.Task = .{
+        .id = old.id,
+        .text = editor.taskSlice(),
+        .proj_first = 0,
+        .proj_count = 0,
+        .ctx_first = 0,
+        .ctx_count = 0,
+        .priority = editor.priorityValue(),
+        .status = old.status,
+        .due = editor.dueSlice(),
+        .repeat = editor.repeatSlice(),
+        .created_ms = old.created_ms,
+    };
+
+    try store.rewriteJsonFileReplacingIndex(
+        allocator,
+        &file,
+        tasks,
+        editor.editing_index,
+        new_task,
+    );
+
+    // Reload both files; index owns its own allocations.
+    try ctx.index.reload(allocator, ctx.todo_file.*, ctx.done_file.*);
+
+    // Restore focus and keep selection near the edited task.
+    ui.focus = if (editing_status == .done) .done else .todo;
+
+    var list_view = ui.activeView();
+    const new_slice: []const Task = switch (ui.focus) {
+        .todo => ctx.index.todoSlice(),
+        .done => ctx.index.doneSlice(),
+    };
+
+    if (new_slice.len == 0) {
+        list_view.selected_index = 0;
+        list_view.scroll_offset = 0;
+        list_view.last_move = 0;
+    } else {
+        const idx = if (editor.editing_index < new_slice.len)
+            editor.editing_index
+        else
+            new_slice.len - 1;
+
+        list_view.selected_index = idx;
+        list_view.last_move = 0;
+    }
+}
+
+fn saveEditorToDisk(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    editor: *EditorState,
+    ui: *UiState,
+) !void {
+    if (editor.is_new) {
+        try saveNewTask(ctx, allocator, editor, ui);
+    } else {
+        try saveExistingTask(ctx, allocator, editor, ui);
+    }
+}
 
 fn markDone(
     ctx: *TuiContext,
@@ -1437,7 +1539,7 @@ fn handleEditorKey(
 
             // :w or :wq -> save and exit
             if (std.mem.eql(u8, cmd, "w") or std.mem.eql(u8, cmd, "wq")) {
-                try saveNewTask(ctx, allocator, editor, ui);
+                try saveEditorToDisk(ctx, allocator, editor, ui);
                 editor.resetCommand();
                 view.* = .list;
                 return;
