@@ -149,7 +149,8 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
                         .ctx_count = 0,
                         .priority = 0,
                         .status = .todo,
-                        .due = empty,
+                        .due_date = empty,
+                        .due_time = empty,
                         .repeat = empty,
                         .created_ms = 0,
                     };
@@ -181,7 +182,8 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
                     .ctx_count = 0,
                     .priority = 0,
                     .status = .todo,
-                    .due = empty,
+                    .due_date = empty,
+                    .due_time = empty,
                     .repeat = empty,
                     .created_ms = 0,
                 };
@@ -626,8 +628,12 @@ fn parseTaskFromJsonLine(
     // Core string fields
     const text_slice   = try parseStringField(line, "text",   true,  text_buf, cursor);
 
-    const due_date_slice    = try parseStringField(line, "due_date",    false, text_buf, cursor);
-    const legacy_due    = try parseStringField(line, "due",    false, text_buf, cursor);
+    // Shared zero-length sentinel from current cursor
+    const empty: []const u8 = text_buf[cursor.*..cursor.*];
+
+
+    var due_date_slice    = try parseStringField(line, "due_date",    false, text_buf, cursor);
+    const legacy_due    = parseStringField(line, "due",    false, text_buf, cursor) catch empty;
     const due_time_slice    = try parseStringField(line, "due_time",    false, text_buf, cursor);
 
 
@@ -645,8 +651,6 @@ fn parseTaskFromJsonLine(
 
     const status_val = parseStatusField(line) catch Status.todo;
 
-    // Shared empty slice sentinel out of text_buf
-    const empty = text_buf[cursor.*..cursor.*];
 
     return Task{
         .id         = id_opt orelse 0,
@@ -657,8 +661,8 @@ fn parseTaskFromJsonLine(
         .ctx_count  = 0,
         .priority   = prio_val,
         .status     = status_val,
-        .due_date        = if (due_date_slice.len != 0) due_date_slice else empty,
-        .due        = if (due_time_slice.len != 0) due_time_slice else empty,
+        .due_date   = if (due_date_slice.len != 0) due_date_slice else empty,
+        .due_time   = if (due_time_slice.len != 0) due_time_slice else empty,
         .repeat     = if (repeat_slice.len != 0) repeat_slice else empty,
         .created_ms = created_opt orelse 0,
     };
@@ -668,7 +672,7 @@ fn parseTaskFromJsonLine(
 /// Append a single task as one JSON line to `file`.
 /// Schema:
 /// {"id":..., "text":"...", "projects":[], "contexts":[], "priority":0,
-///  "due":null|"...", "repeat":null|"...", "created":123, "status":"todo"}
+///  "due_date":null|"...", "due_time":null|"...", "repeat":null|"...", "created":123, "status":"todo"}
 pub fn appendJsonTaskLine(
     allocator: mem.Allocator,
     file: *fs.File,
@@ -686,7 +690,13 @@ fn writeJsonLineForTask(
 ) !void {
     // Rough but safe upper bound: each character might become "\u00XX"
     // and some characters can appear again in tags, so we reserve a factor.
-    const approx_len = (task.text.len + task.due.len + task.repeat.len + 32) * 12;
+
+    const approx_len =
+        (task.text.len
+        + task.due_date.len
+        + task.due_time.len
+        + task.repeat.len
+        + 32) * 12;
 
     var buf = try allocator.alloc(u8, approx_len);
     defer allocator.free(buf);

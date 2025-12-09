@@ -95,7 +95,8 @@ const EditorState = struct {
     pub const Field = enum {
         task,
         priority,
-        due,
+        due_date,
+        due_time,
         repeat,
     };
 
@@ -121,6 +122,12 @@ const EditorState = struct {
     due_buf: [64]u8 = undefined,
     due_len: usize = 0,
     due_cursor: usize = 0,
+
+
+    // due time string, e.g. "23:59" or "11:59pm" as typed
+    time_buf: [32]u8 = undefined,
+    time_len: usize = 0,
+    time_cursor: usize = 0,
 
     // repeat rule string
     repeat_buf: [64]u8 = undefined,
@@ -152,6 +159,10 @@ const EditorState = struct {
             .due_buf = undefined,
             .due_len = 0,
             .due_cursor = 0,
+
+            .time_buf = undefined,
+            .time_len = 0,
+            .time_cursor = 0,
 
             .repeat_buf = undefined,
             .repeat_len = 0,
@@ -202,12 +213,20 @@ const EditorState = struct {
             self.prio_cursor = digits;
         }
 
-        // due
-        const due_len = @min(task.due.len, self.due_buf.len);
-        if (due_len != 0) {
-            @memcpy(self.due_buf[0..due_len], task.due[0..due_len]);
-            self.due_len = due_len;
-            self.due_cursor = due_len;
+        // due_date
+        const date_len = @min(task.due_date.len, self.due_buf.len);
+        if (date_len != 0) {
+            @memcpy(self.due_buf[0..date_len], task.due_date[0..date_len]);
+            self.due_len = date_len;
+            self.due_cursor = date_len;
+        }
+
+        // due_time
+        const time_len = @min(task.due_time.len, self.time_buf.len);
+        if (time_len != 0) {
+            @memcpy(self.time_buf[0..time_len], task.due_time[0..time_len]);
+            self.time_len = time_len;
+            self.time_cursor = time_len;
         }
 
         // repeat
@@ -236,6 +255,10 @@ const EditorState = struct {
 
     pub fn dueSlice(self: *const EditorState) []const u8 {
         return self.due_buf[0..self.due_len];
+    }
+
+    pub fn timeSlice(self: *const EditorState) []const u8 {
+        return self.time_buf[0..self.time_len];
     }
 
     pub fn repeatSlice(self: *const EditorState) []const u8 {
@@ -275,53 +298,55 @@ const EditorState = struct {
         self.cmd_len = 0;
     }
 
-    // Editing APIs now respect focus.
-
     pub fn insertChar(self: *EditorState, ch: u8) void {
         switch (self.focus) {
-            .task => insertIntoBuffer(self.buf[0..], &self.len, &self.cursor, ch),
-            .priority => insertIntoBuffer(self.prio_buf[0..], &self.prio_len, &self.prio_cursor, ch),
-            .due => insertIntoBuffer(self.due_buf[0..], &self.due_len, &self.due_cursor, ch),
-            .repeat => insertIntoBuffer(self.repeat_buf[0..], &self.repeat_len, &self.repeat_cursor, ch),
+            .task      => insertIntoBuffer(self.buf[0..],       &self.len,       &self.cursor,       ch),
+            .priority  => insertIntoBuffer(self.prio_buf[0..],  &self.prio_len,  &self.prio_cursor,  ch),
+            .due_date  => insertIntoBuffer(self.due_buf[0..],   &self.due_len,   &self.due_cursor,   ch),
+            .due_time  => insertIntoBuffer(self.time_buf[0..],  &self.time_len,  &self.time_cursor,  ch),
+            .repeat    => insertIntoBuffer(self.repeat_buf[0..],&self.repeat_len,&self.repeat_cursor,ch),
         }
     }
 
     pub fn deleteBeforeCursor(self: *EditorState) void {
         switch (self.focus) {
-            .task => deleteBeforeInBuffer(self.buf[0..], &self.len, &self.cursor),
-            .priority => deleteBeforeInBuffer(self.prio_buf[0..], &self.prio_len, &self.prio_cursor),
-            .due => deleteBeforeInBuffer(self.due_buf[0..], &self.due_len, &self.due_cursor),
-            .repeat => deleteBeforeInBuffer(self.repeat_buf[0..], &self.repeat_len, &self.repeat_cursor),
+            .task      => deleteBeforeInBuffer(self.buf[0..],       &self.len,       &self.cursor),
+            .priority  => deleteBeforeInBuffer(self.prio_buf[0..],  &self.prio_len,  &self.prio_cursor),
+            .due_date  => deleteBeforeInBuffer(self.due_buf[0..],   &self.due_len,   &self.due_cursor),
+            .due_time  => deleteBeforeInBuffer(self.time_buf[0..],  &self.time_len,  &self.time_cursor),
+            .repeat    => deleteBeforeInBuffer(self.repeat_buf[0..],&self.repeat_len,&self.repeat_cursor),
         }
     }
 
     pub fn moveCursor(self: *EditorState, delta: i32) void {
         switch (self.focus) {
-            .task => moveCursorImpl(&self.cursor, self.len, delta),
-            .priority => moveCursorImpl(&self.prio_cursor, self.prio_len, delta),
-            .due => moveCursorImpl(&self.due_cursor, self.due_len, delta),
-            .repeat => moveCursorImpl(&self.repeat_cursor, self.repeat_len, delta),
+            .task      => moveCursorImpl(&self.cursor,       self.len,       delta),
+            .priority  => moveCursorImpl(&self.prio_cursor,  self.prio_len,  delta),
+            .due_date  => moveCursorImpl(&self.due_cursor,   self.due_len,   delta),
+            .due_time  => moveCursorImpl(&self.time_cursor,  self.time_len,  delta),
+            .repeat    => moveCursorImpl(&self.repeat_cursor,self.repeat_len,delta),
         }
     }
 
     pub fn moveToStart(self: *EditorState) void {
         switch (self.focus) {
-            .task => self.cursor = 0,
-            .priority => self.prio_cursor = 0,
-            .due => self.due_cursor = 0,
-            .repeat => self.repeat_cursor = 0,
+            .task      => self.cursor       = 0,
+            .priority  => self.prio_cursor  = 0,
+            .due_date  => self.due_cursor   = 0,
+            .due_time  => self.time_cursor  = 0,
+            .repeat    => self.repeat_cursor= 0,
         }
     }
 
     pub fn moveToEnd(self: *EditorState) void {
         switch (self.focus) {
-            .task => self.cursor = self.len,
-            .priority => self.prio_cursor = self.prio_len,
-            .due => self.due_cursor = self.due_len,
-            .repeat => self.repeat_cursor = self.repeat_len,
+            .task      => self.cursor       = self.len,
+            .priority  => self.prio_cursor  = self.prio_len,
+            .due_date  => self.due_cursor   = self.due_len,
+            .due_time  => self.time_cursor  = self.time_len,
+            .repeat    => self.repeat_cursor= self.repeat_len,
         }
     }
-
 
     pub fn setFocus(self: *EditorState, field: Field) void {
         self.focus = field;
@@ -332,8 +357,11 @@ const EditorState = struct {
             .priority => {
                 if (self.prio_cursor > self.prio_len) self.prio_cursor = self.prio_len;
             },
-            .due => {
+            .due_date => {
                 if (self.due_cursor > self.due_len) self.due_cursor = self.due_len;
+            },
+            .due_time => {
+                if (self.time_cursor > self.time_len) self.time_cursor = self.time_len;
             },
             .repeat => {
                 if (self.repeat_cursor > self.repeat_len) self.repeat_cursor = self.repeat_len;
@@ -343,20 +371,22 @@ const EditorState = struct {
 
     pub fn focusNext(self: *EditorState) void {
         const next: Field = switch (self.focus) {
-            .task => .priority,
-            .priority => .due,
-            .due => .repeat,
-            .repeat => .task,
+            .task      => .priority,
+            .priority  => .due_date,
+            .due_date  => .due_time,
+            .due_time  => .repeat,
+            .repeat    => .task,
         };
         self.setFocus(next);
     }
 
     pub fn focusPrev(self: *EditorState) void {
         const prev: Field = switch (self.focus) {
-            .task => .repeat,
-            .priority => .task,
-            .due => .priority,
-            .repeat => .due,
+            .task      => .repeat,
+            .priority  => .task,
+            .due_date  => .priority,
+            .due_time  => .due_date,
+            .repeat    => .due_time,
         };
         self.setFocus(prev);
     }
@@ -997,12 +1027,15 @@ fn drawEditorMeta(
     const label_col: u16 = 2;
 
     const l_prio = "prio";
-    const l_due = "due";
+    const l_date = "due date";
+    const l_time = "due time";
     const l_repeat = "repeat";
 
     var max_label_len: u16 = @intCast(l_prio.len);
-    const due_len: u16 = @intCast(l_due.len);
-    if (due_len > max_label_len) max_label_len = due_len;
+    const date_len: u16 = @intCast(l_date.len);
+    if (date_len > max_label_len) max_label_len = date_len;
+    const time_len: u16 = @intCast(l_time.len);
+    if (time_len > max_label_len) max_label_len = time_len;
     const rep_len: u16 = @intCast(l_repeat.len);
     if (rep_len > max_label_len) max_label_len = rep_len;
 
@@ -1031,12 +1064,29 @@ fn drawEditorMeta(
             win,
             top,
             label_field_width,
-            "due",
+            "due date",
             editor.dueSlice(),
             editor.due_cursor,
-            editor.focus == .due,
+            editor.focus == .due_date,
         );
     }
+
+
+    top += 3;
+    if (top >= term_height) return;
+
+    if (top + 2 < term_height) {
+        drawMetaFieldBox(
+            win,
+            top,
+            label_field_width,
+            "due time",
+            editor.timeSlice(),
+            editor.time_cursor,
+            editor.focus == .due_time,
+        );
+    }
+
     top += 3;
     if (top >= term_height) return;
 
@@ -1340,7 +1390,8 @@ fn saveExistingTask(
         .ctx_count = 0,
         .priority = editor.priorityValue(),
         .status = old.status,
-        .due = editor.dueSlice(),
+        .due_date   = editor.dueSlice(),
+        .due_time   = editor.timeSlice(),
         .repeat = editor.repeatSlice(),
         .created_ms = old.created_ms,
     };
@@ -1444,7 +1495,8 @@ fn saveNewTask(
     const text = editor.taskSlice();
     if (text.len == 0) return; // ignore empty tasks
 
-    const due = editor.dueSlice();
+    const date = editor.dueSlice();
+    const time = editor.timeSlice();
     const repeat = editor.repeatSlice();
     const prio_val: u8 = editor.priorityValue();
 
@@ -1469,7 +1521,8 @@ fn saveNewTask(
         .ctx_count = 0,
         .priority = prio_val,
         .status = .todo,
-        .due = due,
+        .due_date    = date,
+        .due_time    = time,
         .repeat = repeat,
         .created_ms = now_ms,
     };
@@ -1560,7 +1613,7 @@ fn handleEditorKey(
             }
             if (std.mem.eql(u8, cmd, "d")) {
                 editor.resetCommand();
-                editor.focus = .due;
+                editor.focus = .due_date;
                 editor.mode = .insert;
                 return;
             }
@@ -1668,24 +1721,7 @@ fn handleEditorKey(
         .insert => {
             // Backspace deletes in the focused field
             if (key.matches(vaxis.Key.backspace, .{})) {
-                switch (editor.focus) {
-                    .task => editor.deleteBeforeCursor(),
-                    .priority => deleteBeforeInBuffer(
-                        editor.prio_buf[0..],
-                        &editor.prio_len,
-                        &editor.prio_cursor,
-                    ),
-                    .due => deleteBeforeInBuffer(
-                        editor.due_buf[0..],
-                        &editor.due_len,
-                        &editor.due_cursor,
-                    ),
-                    .repeat => deleteBeforeInBuffer(
-                        editor.repeat_buf[0..],
-                        &editor.repeat_len,
-                        &editor.repeat_cursor,
-                    ),
-                }
+                editor.deleteBeforeCursor();
                 return;
             }
 
@@ -1697,27 +1733,7 @@ fn handleEditorKey(
 
             // Printable ASCII routes to the focused buffer
             if (keyToAscii(key)) |ch| {
-                switch (editor.focus) {
-                    .task => editor.insertChar(ch),
-                    .priority => insertIntoBuffer(
-                        editor.prio_buf[0..],
-                        &editor.prio_len,
-                        &editor.prio_cursor,
-                        ch,
-                    ),
-                    .due => insertIntoBuffer(
-                        editor.due_buf[0..],
-                        &editor.due_len,
-                        &editor.due_cursor,
-                        ch,
-                    ),
-                    .repeat => insertIntoBuffer(
-                        editor.repeat_buf[0..],
-                        &editor.repeat_len,
-                        &editor.repeat_cursor,
-                        ch,
-                    ),
-                }
+                editor.insertChar(ch);
             }
         },
     }
