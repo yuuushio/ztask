@@ -2,6 +2,8 @@ const std = @import("std");
 const mem = std.mem;
 const fs = std.fs;
 
+const dt = @import("due_datetime.zig");
+
 /// Status of a task on disk and in memory.
 pub const Status = enum {
     todo,
@@ -625,32 +627,41 @@ fn parseTaskFromJsonLine(
     text_buf: []u8,
     cursor: *usize,
 ) ParseError!Task {
-    // Core string fields
-    const text_slice   = try parseStringField(line, "text",   true,  text_buf, cursor);
+    const text_slice = try parseStringField(line, "text", true, text_buf, cursor);
 
-    // Shared zero-length sentinel from current cursor
     const empty: []const u8 = text_buf[cursor.*..cursor.*];
 
+    // New canonical fields
+    var due_date_slice = try parseStringField(line, "due_date", false, text_buf, cursor);
+    var due_time_slice = try parseStringField(line, "due_time", false, text_buf, cursor);
 
-    var due_date_slice    = try parseStringField(line, "due_date",    false, text_buf, cursor);
-    const legacy_due    = parseStringField(line, "due",    false, text_buf, cursor) catch empty;
-    const due_time_slice    = try parseStringField(line, "due_time",    false, text_buf, cursor);
+    // Legacy "due" field
+    const legacy_due = parseStringField(line, "due", false, text_buf, cursor) catch empty;
 
+    if (due_date_slice.len == 0 and due_time_slice.len == 0 and legacy_due.len != 0) {
+        var date_buf: [10]u8 = undefined;
+        if (dt.parseUserDueDateCanonical(legacy_due, &date_buf)) {
+            const start = cursor.*;
+            @memcpy(text_buf[start .. start + date_buf.len], date_buf[0..]);
+            due_date_slice = text_buf[start .. start + date_buf.len];
+            cursor.* = start + date_buf.len;
+        }
 
-    if (due_date_slice.len == 0 and legacy_due.len != 0) {
-        // promote legacy "due" into new due_date
-        due_date_slice = legacy_due;
+        var time_buf: [5]u8 = undefined;
+        if (dt.parseUserDueTimeCanonical(legacy_due, &time_buf)) {
+            const start2 = cursor.*;
+            @memcpy(text_buf[start2 .. start2 + time_buf.len], time_buf[0..]);
+            due_time_slice = text_buf[start2 .. start2 + time_buf.len];
+            cursor.* = start2 + time_buf.len;
+        }
     }
 
     const repeat_slice = try parseStringField(line, "repeat", false, text_buf, cursor);
 
-    // Scalars
-    const prio_val     = parsePriorityField(line);
-    const id_opt       = parseUnsignedField(line, "id");
-    const created_opt  = parseSignedField(line, "created");
-
-    const status_val = parseStatusField(line) catch Status.todo;
-
+    const prio_val    = parsePriorityField(line);
+    const id_opt      = parseUnsignedField(line, "id");
+    const created_opt = parseSignedField(line, "created");
+    const status_val  = parseStatusField(line) catch Status.todo;
 
     return Task{
         .id         = id_opt orelse 0,
