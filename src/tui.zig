@@ -2,6 +2,8 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const store = @import("task_store.zig");
 
+const dt = @import("due_datetime.zig");
+
 const Cell = vaxis.Cell;
 
 const fs = std.fs;
@@ -84,6 +86,36 @@ fn moveCursorImpl(cur: *usize, len: usize, delta: i32) void {
     if (next > max) next = max;
 
     cur.* = @intCast(next);
+}
+
+
+fn canonicalDueFromEditor(
+    editor: *const EditorState,
+    date_buf: *[10]u8,
+    time_buf: *[5]u8,
+) struct {
+    date: []const u8,
+    time: []const u8,
+} {
+    const raw_date = editor.dueSlice();
+    const raw_time = editor.timeSlice();
+
+    var date_slice: []const u8 = &[_]u8{};
+    var time_slice: []const u8 = &[_]u8{};
+
+    if (dt.parseUserDueDateCanonical(raw_date, date_buf)) {
+        date_slice = date_buf[0..];
+
+        // Only consider time when date is valid
+        if (dt.parseUserDueTimeCanonical(raw_time, time_buf)) {
+            time_slice = time_buf[0..];
+        }
+    }
+
+    return .{
+        .date = date_slice,
+        .time = time_slice,
+    };
 }
 
 const EditorState = struct {
