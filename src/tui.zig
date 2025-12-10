@@ -1674,13 +1674,6 @@ fn handleEditorKey(
         return;
     }
 
-    // ":" enters editor command-line (from any mode, forces normal).
-    if (key.matches(':', .{})) {
-        editor.mode = .normal;
-        editor.resetCommand();
-        editor.cmd_active = true;
-        return;
-    }
 
     // Esc: insert -> normal, normal -> leave editor.
     if (key.matches(vaxis.Key.escape, .{})) {
@@ -1693,6 +1686,14 @@ fn handleEditorKey(
 
     switch (editor.mode) {
         .normal => {
+            // ":" enters editor command-line (from any mode, forces normal).
+            if (key.matches(':', .{})) {
+                editor.mode = .normal;
+                editor.resetCommand();
+                editor.cmd_active = true;
+                return;
+            }
+
             // vertical focus cycling between fields
             if (key.matches('j', .{})) {
                 editor.focusNext();
