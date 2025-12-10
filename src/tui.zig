@@ -1413,18 +1413,22 @@ fn saveExistingTask(
 
     const old = tasks[editor.editing_index];
 
+    var date_buf: [10]u8 = undefined;
+    var time_buf: [5]u8 = undefined;
+    const due_info = canonicalDueFromEditor(editor, &date_buf, &time_buf);
+
     const new_task: store.Task = .{
-        .id = old.id,
-        .text = editor.taskSlice(),
+        .id         = old.id,
+        .text       = editor.taskSlice(),
         .proj_first = 0,
         .proj_count = 0,
-        .ctx_first = 0,
-        .ctx_count = 0,
-        .priority = editor.priorityValue(),
-        .status = old.status,
-        .due_date   = editor.dueSlice(),
-        .due_time   = editor.timeSlice(),
-        .repeat = editor.repeatSlice(),
+        .ctx_first  = 0,
+        .ctx_count  = 0,
+        .priority   = editor.priorityValue(),
+        .status     = old.status,
+        .due_date   = due_info.date,
+        .due_time   = due_info.time,
+        .repeat     = editor.repeatSlice(),
         .created_ms = old.created_ms,
     };
 
@@ -1436,10 +1440,8 @@ fn saveExistingTask(
         new_task,
     );
 
-    // Reload both files; index owns its own allocations.
     try ctx.index.reload(allocator, ctx.todo_file.*, ctx.done_file.*);
 
-    // Restore focus and keep selection near the edited task.
     ui.focus = if (editing_status == .done) .done else .todo;
 
     var list_view = ui.activeView();
@@ -1525,14 +1527,15 @@ fn saveNewTask(
     ui: *UiState,
 ) !void {
     const text = editor.taskSlice();
-    if (text.len == 0) return; // ignore empty tasks
+    if (text.len == 0) return;
 
-    const date = editor.dueSlice();
-    const time = editor.timeSlice();
+    var date_buf: [10]u8 = undefined;
+    var time_buf: [5]u8 = undefined;
+    const due_info = canonicalDueFromEditor(editor, &date_buf, &time_buf);
+
     const repeat = editor.repeatSlice();
     const prio_val: u8 = editor.priorityValue();
 
-    // Compute next id cheaply: scan existing todo/done once and keep max.
     var max_id: u64 = 0;
     for (ctx.index.todoSlice()) |t| {
         if (t.id > max_id) max_id = t.id;
@@ -1545,23 +1548,22 @@ fn saveNewTask(
     const now_ms: i64 = std.time.milliTimestamp();
 
     const new_task: store.Task = .{
-        .id = new_id,
-        .text = text,
+        .id         = new_id,
+        .text       = text,
         .proj_first = 0,
         .proj_count = 0,
-        .ctx_first = 0,
-        .ctx_count = 0,
-        .priority = prio_val,
-        .status = .todo,
-        .due_date    = date,
-        .due_time    = time,
-        .repeat = repeat,
+        .ctx_first  = 0,
+        .ctx_count  = 0,
+        .priority   = prio_val,
+        .status     = .todo,
+        .due_date   = due_info.date,
+        .due_time   = due_info.time,
+        .repeat     = repeat,
         .created_ms = now_ms,
     };
 
-    var file = ctx.todo_file.*; // copy; same OS handle
+    var file = ctx.todo_file.*;
     try store.appendJsonTaskLine(allocator, &file, new_task);
-
     try ctx.index.reload(allocator, file, ctx.done_file.*);
 
     if (ctx.index.todoSlice().len != 0) {
