@@ -156,16 +156,29 @@ pub fn parseUserDueDateCanonical(input: []const u8, out: *[10]u8) bool {
     const dim2 = daysInMonth(year, month_val);
     if (day_val < 1 or day_val > dim2) return false;
 
-    out[0] = '0' + @intCast((year / 1000) % 10);
-    out[1] = '0' + @intCast((year / 100) % 10);
-    out[2] = '0' + @intCast((year / 10) % 10);
-    out[3] = '0' + @intCast(year % 10);
+    const y_thousands: u8 = @as(u8, @intCast((year / 1000) % 10));
+    const y_hundreds:  u8 = @as(u8, @intCast((year / 100) % 10));
+    const y_tens:      u8 = @as(u8, @intCast((year / 10) % 10));
+    const y_ones:      u8 = @as(u8, @intCast(year % 10));
+
+    out[0] = '0' + y_thousands;
+    out[1] = '0' + y_hundreds;
+    out[2] = '0' + y_tens;
+    out[3] = '0' + y_ones;
     out[4] = '-';
-    out[5] = '0' + @intCast((month_val / 10) % 10);
-    out[6] = '0' + @intCast(month_val % 10);
+
+    // Month MM
+    const m_tens: u8 = @as(u8, @intCast((month_val / 10) % 10));
+    const m_ones: u8 = @as(u8, @intCast(month_val % 10));
+    out[5] = '0' + m_tens;
+    out[6] = '0' + m_ones;
     out[7] = '-';
-    out[8] = '0' + @intCast((day_val / 10) % 10);
-    out[9] = '0' + @intCast(day_val % 10);
+
+    // Day DD
+    const d_tens2: u8 = @as(u8, @intCast((day_val / 10) % 10));
+    const d_ones2: u8 = @as(u8, @intCast(day_val % 10));
+    out[8] = '0' + d_tens2;
+    out[9] = '0' + d_ones2;
 
     return true;
 }
@@ -270,11 +283,16 @@ pub fn parseUserDueTimeCanonical(input: []const u8, out: *[5]u8) bool {
         }
     }
 
-    out[0] = '0' + @intCast(hour / 10);
-    out[1] = '0' + @intCast(hour % 10);
+    const h_tens:  u8 = @as(u8, @intCast(hour / 10));
+    const h_ones:  u8 = @as(u8, @intCast(hour % 10));
+    const m_tens2: u8 = @as(u8, @intCast(minute / 10));
+    const m_ones2: u8 = @as(u8, @intCast(minute % 10));
+
+    out[0] = '0' + h_tens;
+    out[1] = '0' + h_ones;
     out[2] = ':';
-    out[3] = '0' + @intCast(minute / 10);
-    out[4] = '0' + @intCast(minute % 10);
+    out[3] = '0' + m_tens2;
+    out[4] = '0' + m_ones2;
 
     return true;
 }
