@@ -22,6 +22,9 @@ const ListKind = ui_mod.ListKind;
 
 const ListView = ui_mod.ListView;
 
+const LIST_START_ROW: usize = 4;
+const STATUS_WIDTH: usize = 4;
+
 /// Event type for the libvaxis low-level loop.
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -424,8 +427,6 @@ const EditorState = struct {
     }
 };
 
-/// First row used for the task list (0 = header, 2 = counts, 3 blank).
-const LIST_START_ROW: usize = 4;
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -2022,13 +2023,17 @@ fn drawTodoList(
     if (term_width <= 2) return;
     const content_width: usize = term_width - 2;
 
+    if (content_width <= STATUS_WIDTH) return;
+
+    const text_width: usize = content_width - STATUS_WIDTH;
+
     const dir = view.last_move;
 
     // Only adjust scroll_offset if the selected task is not fully visible
     // with the current offset. This avoids jitter when moving inside the
     // existing viewport.
-    if (!isSelectionFullyVisible(view, tasks, viewport_height, content_width)) {
-        recomputeScrollOffsetForSelection(view, tasks, viewport_height, content_width, dir);
+    if (!isSelectionFullyVisible(view, tasks, viewport_height, text_width)) {
+        recomputeScrollOffsetForSelection(view, tasks, viewport_height, text_width, dir);
     }
 
     const indicator_slice = ">"[0..1];
@@ -2051,7 +2056,7 @@ fn drawTodoList(
         const selected = (view.selected_index == idx);
         const style = if (selected) sel_style else base_style;
 
-        const rows_needed = measureWrappedRows(text, content_width);
+        const rows_needed = measureWrappedRows(text, text_width);
         if (rows_needed == 0) continue;
 
         if (rows_needed > remaining_rows) {
@@ -2078,13 +2083,44 @@ fn drawTodoList(
             _ = win.writeCell(1, row_u16, cell);
         }
 
+        // Status marker in columns starting at 2: "[ ] ", "[@] ", or "[x] ".
+        if (term_width > 2) {
+            const status_text: []const u8 = switch (task.status) {
+                .todo => "[ ]",
+                .ongoing => "[@]",
+                .done => "[x]",
+            };
+
+            var col_status: u16 = 2;
+            var s_i: usize = 0;
+            while (s_i < status_text.len and col_status < win.width) : (s_i += 1) {
+                const g = status_text[s_i .. s_i + 1];
+                const cell: Cell = .{
+                    .char = .{ .grapheme = g, .width = 1 },
+                    .style = style,
+                };
+                _ = win.writeCell(col_status, row_u16, cell);
+                col_status += 1;
+            }
+
+            // Trailing space after the marker, if there is room.
+            if (col_status < win.width) {
+                const sp = " "[0..1];
+                const cell: Cell = .{
+                    .char = .{ .grapheme = sp, .width = 1 },
+                    .style = style,
+                };
+                _ = win.writeCell(col_status, row_u16, cell);
+            }
+        }
+
         // Draw wrapped text starting at this row and column 2.
         drawWrappedText(
             win,
             row,
-            2,
+            2 + STATUS_WIDTH,
             rows_needed,
-            content_width,
+            text_width,
             text,
             style,
         );
