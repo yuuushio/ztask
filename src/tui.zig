@@ -1896,6 +1896,133 @@ fn drawWrappedText(
 }
 
 
+/// Logical width of the "P{prio}" prefix in columns.
+/// This is kept in sync with how drawPriorityPrefix paints cells:
+/// one "P" plus 1–3 decimal digits.
+fn priorityLen(prio: u8) usize {
+    if (prio == 0) return 0;
+    if (prio < 10) return 2;   // "P3"
+    if (prio < 100) return 3;  // "P42"
+    return 4;                  // "P255"
+}
+
+/// Draw a single decimal digit using only static storage.
+/// This avoids any stack-backed grapheme slices that would outlive
+/// the current call when vaxis later renders the grid.
+fn drawPriorityDigit(
+    win: vaxis.Window,
+    row: u16,
+    col: u16,
+    digit: u8,
+    style: vaxis.Style,
+) u16 {
+    if (col >= win.width) return col;
+    if (digit > 9) return col;
+
+    const digits = "0123456789";
+    const g = digits[digit .. digit + 1];
+
+    _ = win.writeCell(col, row, .{
+        .char = .{ .grapheme = g, .width = 1 },
+        .style = style,
+    });
+
+    return col + 1;
+}
+
+/// Paints "P{prio} " starting at `start_col`, returns the column after
+/// the trailing space. For prio == 0 it returns start_col and paints
+/// nothing. All graphemes come from string literals, so lifetimes are safe.
+fn drawPriorityPrefix(
+    win: vaxis.Window,
+    row: u16,
+    start_col: u16,
+    prio: u8,
+    style: vaxis.Style,
+) u16 {
+    if (prio == 0 or start_col >= win.width) return start_col;
+
+    var col = start_col;
+
+    const P_slice = "P"[0..1];
+    _ = win.writeCell(col, row, .{
+        .char = .{ .grapheme = P_slice, .width = 1 },
+        .style = style,
+    });
+    col += 1;
+    if (col >= win.width) return col;
+
+    if (prio >= 100) {
+        const hundreds: u8 = prio / 100;
+        const tens: u8 = (prio / 10) % 10;
+        const ones: u8 = prio % 10;
+
+        col = drawPriorityDigit(win, row, col, hundreds, style);
+        if (col >= win.width) return col;
+        col = drawPriorityDigit(win, row, col, tens, style);
+        if (col >= win.width) return col;
+        col = drawPriorityDigit(win, row, col, ones, style);
+    } else if (prio >= 10) {
+        const tens: u8 = prio / 10;
+        const ones: u8 = prio % 10;
+
+        col = drawPriorityDigit(win, row, col, tens, style);
+        if (col >= win.width) return col;
+        col = drawPriorityDigit(win, row, col, ones, style);
+    } else {
+        col = drawPriorityDigit(win, row, col, prio, style);
+    }
+
+    // trailing space after "Pnn"
+    if (col < win.width) {
+        const space = " "[0..1];
+        _ = win.writeCell(col, row, .{
+            .char = .{ .grapheme = space, .width = 1 },
+            .style = style,
+        });
+        col += 1;
+    }
+
+    return col;
+}
+
+/// Width of status + optional priority segment (exclusive of the leading
+/// "> " prefix, inclusive of all spaces before the task text).
+fn prefixWidthForPrio(prio: u8) usize {
+    const len = priorityLen(prio);
+    if (len == 0) {
+        // "[ ] " only
+        return STATUS_WIDTH;
+    }
+    // "[ ] " + "Pnn" + " "
+    return STATUS_WIDTH + len + 1;
+}
+
+const TaskLayout = struct {
+    prefix: usize,
+    rows: usize,
+};
+
+fn computeLayout(task: Task, content_width: usize) TaskLayout {
+    if (content_width == 0) {
+        return .{ .prefix = 0, .rows = 0 };
+    }
+
+    const prefix = prefixWidthForPrio(task.priority);
+
+    if (content_width <= prefix) {
+        // No horizontal room for text, still one visual row for status/prio.
+        return .{ .prefix = prefix, .rows = 1 };
+    }
+
+    const text_width = content_width - prefix;
+    var rows = measureWrappedRows(task.text, text_width);
+    if (rows == 0) rows = 1;
+
+    return .{ .prefix = prefix, .rows = rows };
+}
+
+
 fn isSelectionFullyVisible(
     view: *const ListView,
     tasks: []const Task,
@@ -1910,21 +2037,19 @@ fn isSelectionFullyVisible(
     var idx = view.scroll_offset;
 
     while (idx < tasks.len and rows_used < viewport_height) : (idx += 1) {
-        var rows = measureWrappedRows(tasks[idx].text, content_width);
-        if (rows == 0) rows = 1;
+        const layout = computeLayout(tasks[idx], content_width);
+        if (layout.rows == 0) break;
 
-        if (rows_used + rows > viewport_height) {
-            // This task would be partially clipped.
+        if (rows_used + layout.rows > viewport_height) {
             if (idx == view.selected_index) return false;
             break;
         }
 
         if (idx == view.selected_index) {
-            // Selected task fits entirely within [rows_used .. rows_used+rows).
             return true;
         }
 
-        rows_used += rows;
+        rows_used += layout.rows;
     }
 
     return false;
@@ -1950,34 +2075,33 @@ fn recomputeScrollOffsetForSelection(
 
     const sel = view.selected_index;
 
-    var rows_sel = measureWrappedRows(tasks[sel].text, content_width);
-    if (rows_sel == 0) rows_sel = 1;
+    var sel_layout = computeLayout(tasks[sel], content_width);
+    if (sel_layout.rows == 0) sel_layout.rows = 1;
 
-    if (rows_sel > viewport_height) {
-        // Pathological: one task taller than the viewport; anchor on it.
+    if (sel_layout.rows > viewport_height) {
+        // One task taller than viewport, anchor on it.
         view.scroll_offset = sel;
         return;
     }
 
-    // Moving up: make the selected task the first in the viewport.
     if (dir < 0) {
+        // Moving up: selected task becomes first visible.
         view.scroll_offset = sel;
         return;
     }
 
-    // Moving down or unknown: keep behaviour where we pack as many
-    // tasks above the selection as will fit.
-    var rows_total: usize = rows_sel;
+    // Moving down/neutral: pack as many tasks above as fit.
+    var rows_total: usize = sel_layout.rows;
     var start_idx: usize = sel;
 
     while (start_idx > 0) {
         const prev_idx = start_idx - 1;
-        var r = measureWrappedRows(tasks[prev_idx].text, content_width);
-        if (r == 0) r = 1;
+        var prev_layout = computeLayout(tasks[prev_idx], content_width);
+        if (prev_layout.rows == 0) prev_layout.rows = 1;
 
-        if (rows_total + r > viewport_height) break;
+        if (rows_total + prev_layout.rows > viewport_height) break;
 
-        rows_total += r;
+        rows_total += prev_layout.rows;
         start_idx = prev_idx;
     }
 
@@ -2009,7 +2133,8 @@ fn drawTodoList(
     const term_width: usize = @intCast(win.width);
     if (term_height <= LIST_START_ROW) return;
 
-    const reserved_rows: usize = if (cmd_active and term_height > LIST_START_ROW + 1) 1 else 0;
+    const reserved_rows: usize =
+        if (cmd_active and term_height > LIST_START_ROW + 1) 1 else 0;
     if (term_height <= LIST_START_ROW + reserved_rows) return;
 
     const viewport_height = term_height - LIST_START_ROW - reserved_rows;
@@ -2019,21 +2144,13 @@ fn drawTodoList(
         view.selected_index = tasks.len - 1;
     }
 
-    // Content starts at column 2: "> " then text.
     if (term_width <= 2) return;
     const content_width: usize = term_width - 2;
-
     if (content_width <= STATUS_WIDTH) return;
 
-    const text_width: usize = content_width - STATUS_WIDTH;
-
     const dir = view.last_move;
-
-    // Only adjust scroll_offset if the selected task is not fully visible
-    // with the current offset. This avoids jitter when moving inside the
-    // existing viewport.
-    if (!isSelectionFullyVisible(view, tasks, viewport_height, text_width)) {
-        recomputeScrollOffsetForSelection(view, tasks, viewport_height, text_width, dir);
+    if (!isSelectionFullyVisible(view, tasks, viewport_height, content_width)) {
+        recomputeScrollOffsetForSelection(view, tasks, viewport_height, content_width, dir);
     }
 
     const indicator_slice = ">"[0..1];
@@ -2048,6 +2165,8 @@ fn drawTodoList(
     var row: usize = LIST_START_ROW;
     var remaining_rows: usize = viewport_height;
 
+    const content_start_col: u16 = 2;
+
     var idx = view.scroll_offset;
     while (idx < tasks.len and remaining_rows > 0 and row < term_height) : (idx += 1) {
         const task = tasks[idx];
@@ -2056,74 +2175,86 @@ fn drawTodoList(
         const selected = (view.selected_index == idx);
         const style = if (selected) sel_style else base_style;
 
-        const rows_needed = measureWrappedRows(text, text_width);
-        if (rows_needed == 0) continue;
+        const layout = computeLayout(task, content_width);
+        const rows_needed = layout.rows;
+        const prefix = layout.prefix;
 
-        if (rows_needed > remaining_rows) {
-            // Do not draw a partially visible task; leave the rest blank.
-            break;
-        }
+        if (rows_needed == 0) break;
+        if (rows_needed > remaining_rows) break;
 
         const row_u16: u16 = @intCast(row);
 
-        // First visual row: draw indicator in column 0, space in column 1.
+        // column 0: ">" or space
         if (term_width > 0) {
             const g = if (selected) indicator_slice else space_slice;
-            const cell: Cell = .{
+            _ = win.writeCell(0, row_u16, .{
                 .char = .{ .grapheme = g, .width = 1 },
                 .style = style,
-            };
-            _ = win.writeCell(0, row_u16, cell);
+            });
         }
+
+        // column 1: space
         if (term_width > 1) {
-            const cell: Cell = .{
+            _ = win.writeCell(1, row_u16, .{
                 .char = .{ .grapheme = space_slice, .width = 1 },
                 .style = style,
-            };
-            _ = win.writeCell(1, row_u16, cell);
+            });
         }
 
-        // Status marker in columns starting at 2: "[ ] ", "[@] ", or "[x] ".
-        if (term_width > 2) {
-            const status_text: []const u8 = switch (task.status) {
-                .todo => "[ ]",
-                .ongoing => "[@]",
-                .done => "[x]",
-            };
+        // status marker at content_start_col
+        const status_text: []const u8 = switch (task.status) {
+            .todo => "[ ]",
+            .ongoing => "[@]",
+            .done => "[x]",
+        };
 
-            var col_status: u16 = 2;
-            var s_i: usize = 0;
-            while (s_i < status_text.len and col_status < win.width) : (s_i += 1) {
-                const g = status_text[s_i .. s_i + 1];
-                const cell: Cell = .{
-                    .char = .{ .grapheme = g, .width = 1 },
-                    .style = style,
-                };
-                _ = win.writeCell(col_status, row_u16, cell);
-                col_status += 1;
-            }
-
-            // Trailing space after the marker, if there is room.
-            if (col_status < win.width) {
-                const sp = " "[0..1];
-                const cell: Cell = .{
-                    .char = .{ .grapheme = sp, .width = 1 },
-                    .style = style,
-                };
-                _ = win.writeCell(col_status, row_u16, cell);
-            }
+        var col_status: u16 = content_start_col;
+        var s_i: usize = 0;
+        while (s_i < status_text.len and col_status < win.width) : (s_i += 1) {
+            const g = status_text[s_i .. s_i + 1];
+            _ = win.writeCell(col_status, row_u16, .{
+                .char = .{ .grapheme = g, .width = 1 },
+                .style = style,
+            });
+            col_status += 1;
+        }
+        // trailing space after "[ ]"
+        if (col_status < win.width) {
+            _ = win.writeCell(col_status, row_u16, .{
+                .char = .{ .grapheme = space_slice, .width = 1 },
+                .style = style,
+            });
+            col_status += 1;
         }
 
-        // Draw wrapped text starting at this row and column 2.
-        drawWrappedText(
-            win,
-            row,
-            2 + STATUS_WIDTH,
-            rows_needed,
-            text_width,
-            text,
-            style,
-        );
+        // priority, only if > 0.
+        // When prio == 0 this leaves a single gap: "[ ] <text>".
+        // When prio > 0 this yields "[ ] Pn <text>" or "[ ] Pnnn <text>"
+        // with the logical width tracked by prefixWidthForPrio().
+        var text_start_col: u16 = col_status;
+        if (task.priority != 0 and col_status < win.width) {
+            text_start_col = drawPriorityPrefix(
+                win,
+                row_u16,
+                col_status,
+                task.priority,
+                style,
+            );
+        }
+
+        // draw wrapped task text starting at text_start_col
+        if (content_width > prefix) {
+            const text_width = content_width - prefix;
+            drawWrappedText(
+                win,
+                row,
+                @intCast(text_start_col),
+                rows_needed,
+                text_width,
+                text,
+                style,
+            );
+        }
 
         row += rows_needed;
         remaining_rows -= rows_needed;
