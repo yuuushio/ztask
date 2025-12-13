@@ -902,6 +902,102 @@ fn drawLabelContainer(
     }
 }
 
+/// A logical view of the rendered task line:
+///     "<task.text>[ optional space ]d:[YYYY-MM-DD[ HH:MM]]"
+///
+/// All segments point either into the task's own buffers or into
+/// string literals. No stack-backed storage is exposed to vaxis.
+const TaskLine = struct {
+    segs: [7][]const u8,
+    seg_count: usize,
+    total_len: usize,
+};
+
+fn appendTaskSeg(line: *TaskLine, seg: []const u8) void {
+    if (seg.len == 0) return;
+    if (line.seg_count >= line.segs.len) return; // guard, should not happen
+    line.segs[line.seg_count] = seg;
+    line.seg_count += 1;
+    line.total_len += seg.len;
+}
+
+/// Build the concatenated logical string for a task.
+///
+/// Shapes:
+///   text only:
+///       "<text>"
+///   text + date:
+///       "<text> d:[YYYY-MM-DD]"
+///   text + date + time:
+///       "<text> d:[YYYY-MM-DD HH:MM]"
+///   date only:
+///       "d:[YYYY-MM-DD[ HH:MM]]"
+fn buildTaskLine(task: Task) TaskLine {
+    var line = TaskLine{
+        .segs = undefined,
+        .seg_count = 0,
+        .total_len = 0,
+    };
+
+    // main text (may be empty)
+    appendTaskSeg(&line, task.text);
+
+    const date = task.due_date;
+    if (date.len == 0) {
+        // no due date => just text
+        return line;
+    }
+
+    // single space between text and due block when text exists
+    if (task.text.len != 0) {
+        appendTaskSeg(&line, " ");
+    }
+
+    appendTaskSeg(&line, "d:[");
+    appendTaskSeg(&line, date);
+
+    const time = task.due_time;
+    if (time.len != 0) {
+        appendTaskSeg(&line, " ");
+        appendTaskSeg(&line, time);
+    }
+
+    appendTaskSeg(&line, "]");
+
+    return line;
+}
+
+/// Access the byte at global index `idx` within the logical concatenation
+/// of all segments. Caller guarantees idx < total_len.
+fn taskLineByte(line: *const TaskLine, idx: usize) u8 {
+    var remaining = idx;
+    var s: usize = 0;
+    while (s < line.seg_count) : (s += 1) {
+        const seg = line.segs[s];
+        if (remaining < seg.len) {
+            return seg[remaining];
+        }
+        remaining -= seg.len;
+    }
+    return 0; // should be unreachable for valid idx
+}
+
+
+/// Access a 1-byte grapheme slice at global index `idx`, backed by the
+/// underlying segment memory (task buffers or string literals).
+fn taskLineGrapheme(line: *const TaskLine, idx: usize) []const u8 {
+    var remaining = idx;
+    var s: usize = 0;
+    while (s < line.seg_count) : (s += 1) {
+        const seg = line.segs[s];
+        if (remaining < seg.len) {
+            const off = remaining;
+            return seg[off .. off + 1];
+        }
+        remaining -= seg.len;
+    }
+    return "?"[0..1]; // defensive fallback
+}
 
 fn drawTaskLine(
     win: vaxis.Window,
@@ -1896,6 +1992,195 @@ fn drawWrappedText(
 }
 
 
+/// Build the textual due suffix for a task into `buf`.
+///
+/// Shape after the status / prio prefix:
+///   "<task.text> d:[YYYY-MM-DD HH:MM]"
+///
+/// Rules:
+///   - If there is no due_date, returns an empty slice.
+///   - If there is a due_date and no task text, suffix is "d:[...]".
+///   - If there is both text and due_date, suffix begins with one space,
+///     so the full line reads "... <text> d:[...]".
+///
+/// Invariants:
+///   - `task.due_date` is either empty or canonical "YYYY-MM-DD" (10 bytes).
+///   - `task.due_time` is either empty or canonical "HH:MM" (5 bytes).
+///   - So worst-case suffix length is 21 bytes:
+///         " " + "d:[" + 10 + " " + 5 + "]".
+fn buildDueSuffixForTask(task: Task, buf: []u8) []const u8 {
+    const date = task.due_date;
+    if (date.len == 0) return buf[0..0];
+
+    const time = task.due_time;
+    const has_time = (time.len != 0);
+
+    var pos: usize = 0;
+
+    // Space between task text and "d:[...]" when there *is* text.
+    if (task.text.len != 0) {
+        buf[pos] = ' ';
+        pos += 1;
+    }
+
+    buf[pos] = 'd';
+    pos += 1;
+    buf[pos] = ':';
+    pos += 1;
+    buf[pos] = '[';
+    pos += 1;
+
+    @memcpy(buf[pos .. pos + date.len], date);
+    pos += date.len;
+
+    if (has_time) {
+        buf[pos] = ' ';
+        pos += 1;
+        @memcpy(buf[pos .. pos + time.len], time);
+        pos += time.len;
+    }
+
+    buf[pos] = ']';
+    pos += 1;
+
+    return buf[0..pos];
+}
+
+/// Access a byte of the conceptual string `main ++ suffix` at global index `idx`.
+fn twoPartByte(main: []const u8, suffix: []const u8, idx: usize) u8 {
+    return if (idx < main.len) main[idx] else suffix[idx - main.len];
+}
+
+
+/// Count rows needed for a full task line (task text + due suffix),
+/// given `max_cols` columns of content.
+fn measureWrappedRowsForTask(task: Task, max_cols: usize) usize {
+    if (max_cols == 0) return 0;
+
+    const line = buildTaskLine(task);
+    if (line.total_len == 0) return 0;
+
+    var rows: usize = 0;
+    var i: usize = 0;
+    const total = line.total_len;
+
+    while (i < total) {
+        rows += 1;
+
+        const line_start = i;
+        var last_space: ?usize = null;
+        var col_count: usize = 0;
+
+        // Consume up to max_cols bytes for this row.
+        while (i < total and col_count < max_cols) : (col_count += 1) {
+            const b = taskLineByte(&line, i);
+            if (isSpaceByte(b)) {
+                last_space = i;
+            }
+            i += 1;
+        }
+
+        // If we hit the column limit and still have more text, prefer
+        // breaking at the last recorded space on this line.
+        if (i < total and col_count == max_cols) {
+            if (last_space) |sp| {
+                if (sp >= line_start) {
+                    i = sp + 1;
+                }
+            }
+        }
+
+        // Skip leading spaces at the start of the next line.
+        while (i < total) {
+            const b = taskLineByte(&line, i);
+            if (!isSpaceByte(b)) break;
+            i += 1;
+        }
+    }
+
+    return rows;
+}
+
+/// Draw `<task.text>` optionally followed by ` d:[YYYY-MM-DD HH:MM]`,
+/// wrapped into `max_rows` rows and `max_cols` columns, starting at
+/// (start_row, col_offset).
+fn drawWrappedTask(
+    win: vaxis.Window,
+    task: Task,
+    start_row: usize,
+    col_offset: usize,
+    max_rows: usize,
+    max_cols: usize,
+    style: vaxis.Style,
+) void {
+    if (max_rows == 0 or max_cols == 0) return;
+
+    const line = buildTaskLine(task);
+    if (line.total_len == 0) return;
+
+    const total = line.total_len;
+    const height = win.height;
+
+    var i: usize = 0;
+    var row_index: usize = 0;
+
+    while (i < total and row_index < max_rows and (start_row + row_index) < height) : (row_index += 1) {
+        const row: u16 = @intCast(start_row + row_index);
+
+        const line_start = i;
+        var last_space: ?usize = null;
+        var col_count: usize = 0;
+
+        // Determine how many bytes fit on this row.
+        while (i < total and col_count < max_cols) : (col_count += 1) {
+            const b = taskLineByte(&line, i);
+            if (isSpaceByte(b)) {
+                last_space = i;
+            }
+            i += 1;
+        }
+
+        var line_end = i;
+
+        if (i < total and col_count == max_cols) {
+            if (last_space) |sp| {
+                if (sp >= line_start) {
+                    line_end = sp;
+                    i = sp + 1;
+                }
+            }
+        }
+
+        // Skip leading spaces for what we actually draw on this row.
+        var seg_start = line_start;
+        while (seg_start < line_end) {
+            const b = taskLineByte(&line, seg_start);
+            if (!isSpaceByte(b)) break;
+            seg_start += 1;
+        }
+
+        var col: usize = col_offset;
+        var j: usize = seg_start;
+        while (j < line_end and col < win.width) : (j += 1) {
+            const g = taskLineGrapheme(&line, j);
+            const cell: Cell = .{
+                .char = .{ .grapheme = g, .width = 1 },
+                .style = style,
+            };
+            _ = win.writeCell(@intCast(col), row, cell);
+            col += 1;
+        }
+
+        // Skip leading spaces at the start of the next logical row.
+        while (i < total) {
+            const b = taskLineByte(&line, i);
+            if (!isSpaceByte(b)) break;
+            i += 1;
+        }
+    }
+}
+
+
 /// Logical width of the "P{prio}" prefix in columns.
 /// This is kept in sync with how drawPriorityPrefix paints cells:
 /// one "P" plus 1–3 decimal digits.
@@ -2003,6 +2288,7 @@ const TaskLayout = struct {
     rows: usize,
 };
 
+
 fn computeLayout(task: Task, content_width: usize) TaskLayout {
     if (content_width == 0) {
         return .{ .prefix = 0, .rows = 0 };
@@ -2011,12 +2297,12 @@ fn computeLayout(task: Task, content_width: usize) TaskLayout {
     const prefix = prefixWidthForPrio(task.priority);
 
     if (content_width <= prefix) {
-        // No horizontal room for text, still one visual row for status/prio.
+        // Only enough room for status/prio on the first row.
         return .{ .prefix = prefix, .rows = 1 };
     }
 
     const text_width = content_width - prefix;
-    var rows = measureWrappedRows(task.text, text_width);
+    var rows = measureWrappedRowsForTask(task, text_width);
     if (rows == 0) rows = 1;
 
     return .{ .prefix = prefix, .rows = rows };
@@ -2170,7 +2456,6 @@ fn drawTodoList(
     var idx = view.scroll_offset;
     while (idx < tasks.len and remaining_rows > 0 and row < term_height) : (idx += 1) {
         const task = tasks[idx];
-        const text = task.text;
 
         const selected = (view.selected_index == idx);
         const style = if (selected) sel_style else base_style;
@@ -2245,13 +2530,13 @@ fn drawTodoList(
         // draw wrapped task text starting at text_start_col
         if (content_width > prefix) {
             const text_width = content_width - prefix;
-            drawWrappedText(
+            drawWrappedTask(
                 win,
+                task,
                 row,
                 @intCast(text_start_col),
                 rows_needed,
                 text_width,
-                text,
                 style,
             );
         }
