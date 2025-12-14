@@ -1643,6 +1643,10 @@ fn saveExistingTask(
     var time_buf: [5]u8 = undefined;
     const due_info = canonicalDueFromEditor(editor, &date_buf, &time_buf);
 
+
+    var repeat_buf: [16]u8 = undefined;
+    const repeat_canon = canonicalRepeatFromEditor(editor, &repeat_buf);
+
     const new_task: store.Task = .{
         .id         = old.id,
         .text       = editor.taskSlice(),
@@ -1654,7 +1658,7 @@ fn saveExistingTask(
         .status     = old.status,
         .due_date   = due_info.date,
         .due_time   = due_info.time,
-        .repeat     = editor.repeatSlice(),
+        .repeat     = repeat_canon,
         .created_ms = old.created_ms,
     };
 
