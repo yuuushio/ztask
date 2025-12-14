@@ -24,6 +24,7 @@ const ListView = ui_mod.ListView;
 
 const LIST_START_ROW: usize = 4;
 const STATUS_WIDTH: usize = 4;
+const META_SUFFIX_BUF_LEN: usize = 48;
 
 /// Event type for the libvaxis low-level loop.
 const Event = union(enum) {
@@ -2125,56 +2126,115 @@ fn drawWrappedText(
 }
 
 
-/// Build the textual due suffix for a task into `buf`.
+/// Build the textual meta suffix (due + repeat) for a task into `buf`.
 ///
 /// Shape after the status / prio prefix:
-///   "<task.text> d:[YYYY-MM-DD HH:MM]"
+///   "<task.text> d:[YYYY-MM-DD HH:MM] r:[2d]"
 ///
 /// Rules:
-///   - If there is no due_date, returns an empty slice.
-///   - If there is a due_date and no task text, suffix is "d:[...]".
-///   - If there is both text and due_date, suffix begins with one space,
-///     so the full line reads "... <text> d:[...]".
+///   - If there is no due_date and no repeat, returns an empty slice.
+///   - If there is a due_date and no task text, suffix starts with "d:[...]".
+///   - If there is repeat only and no task text, suffix starts with "r:[...]".
+///   - If there is task text and at least one meta field, suffix starts with
+///     a single space so the full line reads "... <text> d:[...] r:[...]".
+///   - Time is shown only when there is also a non-empty date.
 ///
-/// Invariants:
-///   - `task.due_date` is either empty or canonical "YYYY-MM-DD" (10 bytes).
-///   - `task.due_time` is either empty or canonical "HH:MM" (5 bytes).
-///   - So worst-case suffix length is 21 bytes:
-///         " " + "d:[" + 10 + " " + 5 + "]".
-fn buildDueSuffixForTask(task: Task, buf: []u8) []const u8 {
+/// Invariants (for new data):
+///   - `task.due_date` is either empty or "YYYY-MM-DD".
+///   - `task.due_time` is either empty or "HH:MM".
+///   - `task.repeat` is either empty or canonical "<N><unit>" (e.g. "2d").
+///
+/// For legacy or malformed data:
+///   - If the combined meta string would exceed `buf.len`, this returns
+///     an empty slice instead of risking overflow.
+fn buildMetaSuffixForTask(task: Task, buf: []u8) []const u8 {
     const date = task.due_date;
-    if (date.len == 0) return buf[0..0];
-
     const time = task.due_time;
-    const has_time = (time.len != 0);
+    const repeat = task.repeat;
+
+    const have_date = (date.len != 0);
+    const have_repeat = (repeat.len != 0);
+    if (!have_date and !have_repeat) return buf[0..0];
+
+    const has_time = (time.len != 0 and have_date);
+
+    // Leading space only when task text exists.
+    const space_before_meta: usize =
+        if (task.text.len != 0) 1 else 0;
+
+    const due_size: usize = if (have_date) blk: {
+        var n: usize = 0;
+        // "d:["
+        n += 3;
+        // date
+        n += date.len;
+        if (has_time) {
+            // " " + time
+            n += 1 + time.len;
+        }
+        // "]"
+        n += 1;
+        break :blk n;
+    } else 0;
+
+    const repeat_size: usize = if (have_repeat)
+        (3 + repeat.len + 1) // "r:[" + repeat + "]"
+    else
+        0;
+
+    const space_between_meta: usize =
+        if (have_date and have_repeat) 1 else 0;
+
+    const total_needed: usize =
+        space_before_meta + due_size + repeat_size + space_between_meta;
+
+    if (total_needed > buf.len) {
+        // Fail closed: no meta rendered instead of risking overflow.
+        return buf[0..0];
+    }
 
     var pos: usize = 0;
 
-    // Space between task text and "d:[...]" when there *is* text.
-    if (task.text.len != 0) {
+    if (space_before_meta == 1) {
         buf[pos] = ' ';
         pos += 1;
     }
 
-    buf[pos] = 'd';
-    pos += 1;
-    buf[pos] = ':';
-    pos += 1;
-    buf[pos] = '[';
-    pos += 1;
+    if (have_date) {
+        buf[pos] = 'd'; pos += 1;
+        buf[pos] = ':'; pos += 1;
+        buf[pos] = '['; pos += 1;
 
-    @memcpy(buf[pos .. pos + date.len], date);
-    pos += date.len;
+        @memcpy(buf[pos .. pos + date.len], date);
+        pos += date.len;
 
-    if (has_time) {
-        buf[pos] = ' ';
+        if (has_time) {
+            buf[pos] = ' ';
+            pos += 1;
+            @memcpy(buf[pos .. pos + time.len], time);
+            pos += time.len;
+        }
+
+        buf[pos] = ']';
         pos += 1;
-        @memcpy(buf[pos .. pos + time.len], time);
-        pos += time.len;
     }
 
-    buf[pos] = ']';
-    pos += 1;
+    if (have_repeat) {
+        if (have_date) {
+            buf[pos] = ' ';
+            pos += 1;
+        }
+
+        buf[pos] = 'r'; pos += 1;
+        buf[pos] = ':'; pos += 1;
+        buf[pos] = '['; pos += 1;
+
+        @memcpy(buf[pos .. pos + repeat.len], repeat);
+        pos += repeat.len;
+
+        buf[pos] = ']';
+        pos += 1;
+    }
 
     return buf[0..pos];
 }
@@ -2190,32 +2250,32 @@ fn twoPartByte(main: []const u8, suffix: []const u8, idx: usize) u8 {
 fn measureWrappedRowsForTask(task: Task, max_cols: usize) usize {
     if (max_cols == 0) return 0;
 
-    const line = buildTaskLine(task);
-    if (line.total_len == 0) return 0;
+    var suffix_buf: [META_SUFFIX_BUF_LEN]u8 = undefined;
+    const suffix = buildMetaSuffixForTask(task, suffix_buf[0..]);
+
+    const main = task.text;
+    const total_len = main.len + suffix.len;
+    if (total_len == 0) return 0;
 
     var rows: usize = 0;
     var i: usize = 0;
-    const total = line.total_len;
 
-    while (i < total) {
+    while (i < total_len) {
         rows += 1;
 
         const line_start = i;
         var last_space: ?usize = null;
         var col_count: usize = 0;
 
-        // Consume up to max_cols bytes for this row.
-        while (i < total and col_count < max_cols) : (col_count += 1) {
-            const b = taskLineByte(&line, i);
+        while (i < total_len and col_count < max_cols) : (col_count += 1) {
+            const b = twoPartByte(main, suffix, i);
             if (isSpaceByte(b)) {
                 last_space = i;
             }
             i += 1;
         }
 
-        // If we hit the column limit and still have more text, prefer
-        // breaking at the last recorded space on this line.
-        if (i < total and col_count == max_cols) {
+        if (i < total_len and col_count == max_cols) {
             if (last_space) |sp| {
                 if (sp >= line_start) {
                     i = sp + 1;
@@ -2223,9 +2283,8 @@ fn measureWrappedRowsForTask(task: Task, max_cols: usize) usize {
             }
         }
 
-        // Skip leading spaces at the start of the next line.
-        while (i < total) {
-            const b = taskLineByte(&line, i);
+        while (i < total_len) {
+            const b = twoPartByte(main, suffix, i);
             if (!isSpaceByte(b)) break;
             i += 1;
         }
@@ -2248,25 +2307,27 @@ fn drawWrappedTask(
 ) void {
     if (max_rows == 0 or max_cols == 0) return;
 
-    const line = buildTaskLine(task);
-    if (line.total_len == 0) return;
+    var suffix_buf: [META_SUFFIX_BUF_LEN]u8 = undefined;
+    const suffix = buildMetaSuffixForTask(task, suffix_buf[0..]);
 
-    const total = line.total_len;
+    const main = task.text;
+    const total_len = main.len + suffix.len;
+    if (total_len == 0) return;
+
     const height = win.height;
 
     var i: usize = 0;
     var row_index: usize = 0;
 
-    while (i < total and row_index < max_rows and (start_row + row_index) < height) : (row_index += 1) {
+    while (i < total_len and row_index < max_rows and (start_row + row_index) < height) : (row_index += 1) {
         const row: u16 = @intCast(start_row + row_index);
 
         const line_start = i;
         var last_space: ?usize = null;
         var col_count: usize = 0;
 
-        // Determine how many bytes fit on this row.
-        while (i < total and col_count < max_cols) : (col_count += 1) {
-            const b = taskLineByte(&line, i);
+        while (i < total_len and col_count < max_cols) : (col_count += 1) {
+            const b = twoPartByte(main, suffix, i);
             if (isSpaceByte(b)) {
                 last_space = i;
             }
@@ -2275,7 +2336,7 @@ fn drawWrappedTask(
 
         var line_end = i;
 
-        if (i < total and col_count == max_cols) {
+        if (i < total_len and col_count == max_cols) {
             if (last_space) |sp| {
                 if (sp >= line_start) {
                     line_end = sp;
@@ -2284,10 +2345,9 @@ fn drawWrappedTask(
             }
         }
 
-        // Skip leading spaces for what we actually draw on this row.
         var seg_start = line_start;
         while (seg_start < line_end) {
-            const b = taskLineByte(&line, seg_start);
+            const b = twoPartByte(main, suffix, seg_start);
             if (!isSpaceByte(b)) break;
             seg_start += 1;
         }
@@ -2295,18 +2355,19 @@ fn drawWrappedTask(
         var col: usize = col_offset;
         var j: usize = seg_start;
         while (j < line_end and col < win.width) : (j += 1) {
-            const g = taskLineGrapheme(&line, j);
+            const b = twoPartByte(main, suffix, j);
+            const g = [1]u8{ b };
+
             const cell: Cell = .{
-                .char = .{ .grapheme = g, .width = 1 },
+                .char = .{ .grapheme = g[0..1], .width = 1 },
                 .style = style,
             };
             _ = win.writeCell(@intCast(col), row, cell);
             col += 1;
         }
 
-        // Skip leading spaces at the start of the next logical row.
-        while (i < total) {
-            const b = taskLineByte(&line, i);
+        while (i < total_len) {
+            const b = twoPartByte(main, suffix, i);
             if (!isSpaceByte(b)) break;
             i += 1;
         }
