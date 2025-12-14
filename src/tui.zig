@@ -1920,11 +1920,11 @@ fn handleEditorKey(
     }
 
 
-    // Esc: insert -> normal, normal -> leave editor.
+    // Esc: in insert mode, return to normal mode.
+    // In normal mode, stay in the editor; leaving the editor is done via :q.
     if (key.matches(vaxis.Key.escape, .{})) {
-        switch (editor.mode) {
-            .insert => editor.mode = .normal,
-            .normal => view.* = .list,
+        if (editor.mode == .insert) {
+            editor.mode = .normal;
         }
         return;
     }
@@ -1954,11 +1954,6 @@ fn handleEditorKey(
                 return;
             }
 
-            if (key.matches('i', .{})) {
-                // insert at current cursor
-                editor.mode = .insert;
-                return;
-            }
             if (key.matches('I', .{})) {
                 // go to start, then insert
                 editor.moveToStart();
