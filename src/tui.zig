@@ -1750,7 +1750,6 @@ fn markDone(
     todo_view.last_move = -1;
 }
 
-
 fn saveNewTask(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
@@ -1764,7 +1763,9 @@ fn saveNewTask(
     var time_buf: [5]u8 = undefined;
     const due_info = canonicalDueFromEditor(editor, &date_buf, &time_buf);
 
-    const repeat = editor.repeatSlice();
+    var repeat_buf: [16]u8 = undefined;
+    const repeat_canon = canonicalRepeatFromEditor(editor, &repeat_buf);
+
     const prio_val: u8 = editor.priorityValue();
 
     var max_id: u64 = 0;
@@ -1789,7 +1790,7 @@ fn saveNewTask(
         .status     = .todo,
         .due_date   = due_info.date,
         .due_time   = due_info.time,
-        .repeat     = repeat,
+        .repeat     = repeat_canon,
         .created_ms = now_ms,
     };
 
