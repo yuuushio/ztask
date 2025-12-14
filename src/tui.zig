@@ -92,6 +92,135 @@ fn moveCursorImpl(cur: *usize, len: usize, delta: i32) void {
 }
 
 
+fn asciiLower(b: u8) u8 {
+    return if (b >= 'A' and b <= 'Z') b + 32 else b;
+}
+
+fn eqLower(s: []const u8, lit: []const u8) bool {
+    if (s.len != lit.len) return false;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (asciiLower(s[i]) != lit[i]) return false;
+    }
+    return true;
+}
+
+fn parseRepeatUnit(unit_raw: []const u8) ?u8 {
+    if (unit_raw.len == 0) return null;
+
+    // single-letter short forms
+    if (unit_raw.len == 1) {
+        const c = asciiLower(unit_raw[0]);
+        return switch (c) {
+            'm' => 'm',
+            'h' => 'h',
+            'd' => 'd',
+            'w' => 'w',
+            'y' => 'y',
+            else => null,
+        };
+    }
+
+    // full words, case-insensitive
+    if (eqLower(unit_raw, "minute") or eqLower(unit_raw, "minutes")) return 'm';
+    if (eqLower(unit_raw, "hour")   or eqLower(unit_raw, "hours"))   return 'h';
+    if (eqLower(unit_raw, "day")    or eqLower(unit_raw, "days"))    return 'd';
+    if (eqLower(unit_raw, "week")   or eqLower(unit_raw, "weeks"))   return 'w';
+    if (eqLower(unit_raw, "year")   or eqLower(unit_raw, "years"))   return 'y';
+
+    return null;
+}
+
+/// Parse a user repeat string into canonical "<N><u>" (e.g. "2d").
+/// Returns null on invalid input.
+fn parseRepeatCanonical(input: []const u8, buf: *[16]u8) ?[]const u8 {
+    // Trim leading/trailing ASCII space/tab.
+    var start: usize = 0;
+    var end: usize = input.len;
+
+    while (start < end and isSpaceByte(input[start])) {
+        start += 1;
+    }
+    while (end > start and isSpaceByte(input[end - 1])) {
+        end -= 1;
+    }
+
+    if (start == end) return null;
+    const s = input[start..end];
+
+    // Parse integer prefix.
+    var i: usize = 0;
+    var value: u32 = 0;
+    var digits: usize = 0;
+
+    while (i < s.len) : (i += 1) {
+        const b = s[i];
+        if (b < '0' or b > '9') break;
+        digits += 1;
+        // Guard against absurdly long numbers.
+        if (digits > 9) return null;
+        value = value * 10 + @as(u32, b - '0');
+    }
+
+    if (digits == 0) return null;
+    if (value == 0) return null;
+
+    // Skip spaces between number and unit.
+    while (i < s.len and isSpaceByte(s[i])) : (i += 1) {}
+
+    if (i >= s.len) return null;
+
+    // Unit token until next space.
+    const unit_start = i;
+    while (i < s.len and !isSpaceByte(s[i])) : (i += 1) {}
+    const unit_slice = s[unit_start..i];
+
+    // Only spaces allowed after the unit.
+    while (i < s.len and isSpaceByte(s[i])) : (i += 1) {}
+    if (i != s.len) return null;
+
+    const unit_char = parseRepeatUnit(unit_slice) orelse return null;
+
+    // Write "<digits><unit_char>" into buf.
+    var tmp_digits: [10]u8 = undefined;
+    var n = value;
+    var rev_len: usize = 0;
+
+    while (true) {
+        const d: u8 = @intCast(n % 10);
+        tmp_digits[rev_len] = '0' + d;
+        rev_len += 1;
+        n /= 10;
+        if (n == 0) break;
+        if (rev_len == tmp_digits.len) return null;
+    }
+
+    var pos: usize = 0;
+    while (rev_len > 0) {
+        rev_len -= 1;
+        buf[pos] = tmp_digits[rev_len];
+        pos += 1;
+    }
+
+    buf[pos] = unit_char;
+    pos += 1;
+
+    return buf[0..pos];
+}
+
+/// Canonical repeat string from the editor.
+/// Empty slice means "no valid repeat".
+fn canonicalRepeatFromEditor(
+    editor: *const EditorState,
+    buf: *[16]u8,
+) []const u8 {
+    const raw = editor.repeatSlice();
+    if (parseRepeatCanonical(raw, buf)) |canon| {
+        return canon;
+    }
+    return &[_]u8{};
+}
+
 fn canonicalDueFromEditor(
     editor: *const EditorState,
     date_buf: *[10]u8,
