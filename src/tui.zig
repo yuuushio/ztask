@@ -45,6 +45,20 @@ const AppView = enum {
 };
 
 
+const ascii_graphemes = blk: {
+    var table: [256][1]u8 = undefined;
+    var i: usize = 0;
+    while (i < table.len) : (i += 1) {
+        table[i][0] = @intCast(i);
+    }
+    break :blk table;
+};
+
+inline fn graphemeFromByte(b: u8) []const u8 {
+    return ascii_graphemes[b][0..1];
+}
+
+
 fn insertIntoBuffer(buf: []u8, len: *usize, cursor: *usize, ch: u8) void {
     if (len.* >= buf.len) return;
     if (cursor.* > len.*) cursor.* = len.*;
@@ -889,8 +903,7 @@ fn drawListCommandLine(
         else
             ' ';
 
-        const buf = [1]u8{ ch };
-        const slice = buf[0..1];
+        const slice = graphemeFromByte(ch);
 
         _ = win.writeCell(1, row, .{
             .char = .{ .grapheme = slice, .width = 1 },
@@ -2057,75 +2070,6 @@ fn measureWrappedRows(text: []const u8, max_cols: usize) usize {
     return rows;
 }
 
-/// Draw `text` starting at (start_row, col_offset), wrapping on ASCII
-/// spaces/tabs into at most `max_rows` rows and `max_cols` columns.
-fn drawWrappedText(
-    win: vaxis.Window,
-    start_row: usize,
-    col_offset: usize,
-    max_rows: usize,
-    max_cols: usize,
-    text: []const u8,
-    style: vaxis.Style,
-) void {
-    if (text.len == 0 or max_rows == 0 or max_cols == 0) return;
-
-    const len = text.len;
-    var i: usize = 0;
-    var row_index: usize = 0;
-
-    while (i < len and row_index < max_rows and (start_row + row_index) < win.height) : (row_index += 1) {
-        const row: u16 = @intCast(start_row + row_index);
-
-        const line_start = i;
-        var last_space: ?usize = null;
-        var col_count: usize = 0;
-
-        // Determine how many bytes fit on this row.
-        while (i < len and col_count < max_cols) : (col_count += 1) {
-            const b = text[i];
-            if (isSpaceByte(b)) {
-                last_space = i;
-            }
-            i += 1;
-        }
-
-        var line_end = i;
-
-        if (i < len and col_count == max_cols) {
-            if (last_space) |sp| {
-                if (sp >= line_start) {
-                    line_end = sp;
-                    i = sp + 1;
-                }
-            }
-        }
-
-        // Skip leading spaces for what we actually draw on this line.
-        var seg_start = line_start;
-        while (seg_start < line_end and isSpaceByte(text[seg_start])) {
-            seg_start += 1;
-        }
-
-        var col: usize = col_offset;
-        var j: usize = seg_start;
-        while (j < line_end and col < win.width) : (j += 1) {
-            const g = text[j .. j + 1];
-            const cell: Cell = .{
-                .char = .{ .grapheme = g, .width = 1 },
-                .style = style,
-            };
-            _ = win.writeCell(@intCast(col), row, cell);
-            col += 1;
-        }
-
-        // Skip leading spaces at the start of the next row.
-        while (i < len and isSpaceByte(text[i])) {
-            i += 1;
-        }
-    }
-}
-
 
 /// Build the textual meta suffix (due + repeat) for a task into `buf`.
 ///
@@ -2357,10 +2301,10 @@ fn drawWrappedTask(
         var j: usize = seg_start;
         while (j < line_end and col < win.width) : (j += 1) {
             const b = twoPartByte(main, suffix, j);
-            const g = [1]u8{ b };
+            const g = graphemeFromByte(b);
 
             const cell: Cell = .{
-                .char = .{ .grapheme = g[0..1], .width = 1 },
+                .char = .{ .grapheme = g, .width = 1 },
                 .style = style,
             };
             _ = win.writeCell(@intCast(col), row, cell);
