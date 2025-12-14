@@ -41,6 +41,8 @@ pub const Task = struct {
     due_time: []const u8,
     repeat: []const u8,
 
+    repeat_next_ms: i64,
+
     /// Unix milliseconds since epoch, for sorting/grouping.
     created_ms: i64,
 };
@@ -154,6 +156,7 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
                         .due_date = empty,
                         .due_time = empty,
                         .repeat = empty,
+                        .repeat_next_ms = 0,
                         .created_ms = 0,
                     };
                 }
@@ -187,6 +190,7 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
                     .due_date = empty,
                     .due_time = empty,
                     .repeat = empty,
+                    .repeat_next_ms = 0,
                     .created_ms = 0,
                 };
             }
@@ -575,7 +579,7 @@ fn isTagWordChar(b: u8) bool {
 /// Scan `text` for tags starting with `marker` ('+' for projects, '#' for contexts).
 /// We require the marker to be at a word boundary and followed by a word-char,
 /// so "do this + that" is not a tag, and "foo+bar@example.com" is not either.
-fn collectTags(
+pub fn collectTags(
     text: []const u8,
     marker: u8,
     out: *[16][]const u8,
@@ -663,6 +667,8 @@ fn parseTaskFromJsonLine(
     const created_opt = parseSignedField(line, "created");
     const status_val  = parseStatusField(line) catch Status.todo;
 
+   const repeat_next_opt = parseSignedField(line, "repeat_next_ms");
+
     return Task{
         .id         = id_opt orelse 0,
         .text       = text_slice,
@@ -675,6 +681,7 @@ fn parseTaskFromJsonLine(
         .due_date   = if (due_date_slice.len != 0) due_date_slice else empty,
         .due_time   = if (due_time_slice.len != 0) due_time_slice else empty,
         .repeat     = if (repeat_slice.len != 0) repeat_slice else empty,
+       .repeat_next_ms = repeat_next_opt orelse 0,
         .created_ms = created_opt orelse 0,
     };
 }
@@ -773,6 +780,9 @@ fn writeJsonLineForTask(
     } else {
         try writeJsonString(w, task.repeat);
     }
+
+   try w.writeAll(",\"repeat_next_ms\":");
+   try w.print("{d}", .{task.repeat_next_ms});
 
     try w.writeAll(",\"created\":");
     try w.print("{d}", .{task.created_ms});

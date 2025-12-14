@@ -616,6 +616,8 @@ pub fn run(
 
     try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
 
+    try processRepeats(ctx, allocator);
+
     var running = true;
     while (running) {
         const event = loop.nextEvent();
@@ -661,6 +663,8 @@ pub fn run(
                 try vx.resize(allocator, tty.writer(), ws);
             },
         }
+
+        try processRepeats(ctx, allocator);
 
         const win = vx.window();
         clearAll(win);
@@ -1062,6 +1066,61 @@ fn appendTaskSeg(line: *TaskLine, seg: []const u8) void {
     line.segs[line.seg_count] = seg;
     line.seg_count += 1;
     line.total_len += seg.len;
+}
+
+
+fn repeatIntervalMsCanonical(canon: []const u8) ?i64 {
+    if (canon.len < 2) return null;
+
+    const unit = canon[canon.len - 1];
+    const unit_ms: i64 = switch (unit) {
+        'm' => 60 * 1000,
+        'h' => 60 * 60 * 1000,
+        'd' => 24 * 60 * 60 * 1000,
+        'w' => 7 * 24 * 60 * 60 * 1000,
+        'y' => 365 * 24 * 60 * 60 * 1000,
+        else => return null,
+    };
+
+    var v: i64 = 0;
+    var i: usize = 0;
+    while (i + 1 < canon.len) : (i += 1) {
+        const b = canon[i];
+        if (b < '0' or b > '9') return null;
+
+        const digit: i64 = @intCast(b - '0');
+        const max = std.math.maxInt(i64);
+        if (max <= 0) return null; 
+
+        const limit: i64 = @divTrunc(max - digit, @as(i64, 10));
+        if (v > limit) return null;
+
+        v = v * 10 + digit;
+    }
+
+    if (v <= 0) return null;
+
+    const max = std.math.maxInt(i64);
+    if (unit_ms <= 0) return null;
+
+    const limit: i64 = @divTrunc(max, unit_ms);
+    if (v > limit) return null;
+
+    return v * unit_ms;
+}
+
+/// Given canonical "<N><unit>" and a base time, compute the next epoch.
+/// Returns 0 on any invalid/overflow situation (meaning: disable timer).
+fn computeRepeatNextMs(canon: []const u8, now_ms: i64) i64 {
+    if (repeatIntervalMsCanonical(canon)) |interval| {
+        if (interval <= 0) return 0;
+
+        const max = std.math.maxInt(i64);
+        if (now_ms <= max - interval) {
+            return now_ms + interval;
+        }
+    }
+    return 0;
 }
 
 /// Build the concatenated logical string for a task.
@@ -1661,6 +1720,26 @@ fn saveExistingTask(
     var repeat_buf: [16]u8 = undefined;
     const repeat_canon = canonicalRepeatFromEditor(editor, &repeat_buf);
 
+
+    var repeat_next_ms: i64 = 0;
+    if (repeat_canon.len != 0) {
+        if (old.status == .done) {
+            // If repeat unchanged and we already had a timer, preserve it.
+            if (old.repeat_next_ms != 0 and std.mem.eql(u8, repeat_canon, old.repeat)) {
+                repeat_next_ms = old.repeat_next_ms;
+            } else {
+                const now_ms = std.time.milliTimestamp();
+                repeat_next_ms = computeRepeatNextMs(repeat_canon, now_ms);
+            }
+        } else {
+            // TODO/other statuses: timer starts only when marked done.
+            repeat_next_ms = 0;
+        }
+    } else {
+        // No repeat configured.
+        repeat_next_ms = 0;
+    }
+
     const new_task: store.Task = .{
         .id         = old.id,
         .text       = editor.taskSlice(),
@@ -1673,6 +1752,7 @@ fn saveExistingTask(
         .due_date   = due_info.date,
         .due_time   = due_info.time,
         .repeat     = repeat_canon,
+        .repeat_next_ms = repeat_next_ms,
         .created_ms = old.created_ms,
     };
 
@@ -1736,11 +1816,15 @@ fn markDone(
     const remove_index = todo_view.selected_index;
     const original = todos[remove_index];
 
-    // Copy the task but mark it as done.
     var moved = original;
     moved.status = .done;
 
-    // Append to done file.
+    moved.repeat_next_ms = 0;
+    if (moved.repeat.len != 0) {
+        const now_ms = std.time.milliTimestamp();
+        moved.repeat_next_ms = computeRepeatNextMs(moved.repeat, now_ms);
+    }
+
     var done_file = ctx.done_file.*;
     try store.appendJsonTaskLine(allocator, &done_file, moved);
 
@@ -1804,6 +1888,7 @@ fn saveNewTask(
         .due_date   = due_info.date,
         .due_time   = due_info.time,
         .repeat     = repeat_canon,
+        .repeat_next_ms = 0,
         .created_ms = now_ms,
     };
 
@@ -1816,6 +1901,52 @@ fn saveNewTask(
         var todo_view = &ui.todo;
         todo_view.selected_index = ctx.index.todoSlice().len - 1;
         todo_view.last_move = 1;
+    }
+}
+
+
+fn processRepeats(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+) !void {
+    while (true) {
+        const dones = ctx.index.doneSlice();
+        if (dones.len == 0) return;
+
+        const now_ms = std.time.milliTimestamp();
+
+        var found = false;
+        var move_index: usize = 0;
+        var move_task: Task = undefined;
+
+        var i: usize = 0;
+        while (i < dones.len) : (i += 1) {
+            const t = dones[i];
+            if (t.repeat.len == 0) continue;
+            if (t.repeat_next_ms <= 0) continue;
+            if (t.repeat_next_ms > now_ms) continue;
+
+            found = true;
+            move_index = i;
+            move_task = t;
+            break;
+        }
+
+        if (!found) break;
+
+        var todo_file = ctx.todo_file.*;
+        var done_file = ctx.done_file.*;
+
+        var resurrect = move_task;
+        resurrect.status = .todo;
+        resurrect.repeat_next_ms = 0; // timer only re-armed on next completion
+
+        try store.appendJsonTaskLine(allocator, &todo_file, resurrect);
+        try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, move_index);
+
+        try ctx.index.reload(allocator, todo_file, done_file);
+
+        // UI indices are clamped lazily in drawTodoList via activeView().
     }
 }
 
