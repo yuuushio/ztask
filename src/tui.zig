@@ -16,6 +16,10 @@ const TaskIndex = task_mod.TaskIndex;
 const Task = task_mod.Task;
 
 
+const ProjectEntry = task_mod.ProjectEntry;
+
+
+
 const ui_mod = @import("ui_state.zig");
 const UiState = ui_mod.UiState;
 const ListKind = ui_mod.ListKind;
@@ -25,6 +29,11 @@ const ListView = ui_mod.ListView;
 const LIST_START_ROW: usize = 4;
 const STATUS_WIDTH: usize = 4;
 const META_SUFFIX_BUF_LEN: usize = 48;
+
+const PROJECT_PANEL_MIN_TERM_WIDTH: usize = 40;
+const PROJECT_PANEL_MIN_LIST_WIDTH: usize = 20;
+const PROJECT_PANEL_MIN_WIDTH: usize = 16;
+const PROJECT_PANEL_MAX_WIDTH: usize = 32;
 
 /// Event type for the libvaxis low-level loop.
 const Event = union(enum) {
@@ -2657,6 +2666,39 @@ fn recomputeScrollOffsetForSelection(
     }
 
     view.scroll_offset = start_idx;
+}
+
+
+fn computeProjectPanelWidth(
+    win: vaxis.Window,
+    index: *const TaskIndex,
+) usize {
+    const projects = index.projectsSlice();
+    if (projects.len == 0) return 0;
+
+    const term_width: usize = @intCast(win.width);
+    if (term_width < PROJECT_PANEL_MIN_TERM_WIDTH) return 0;
+
+    // Longest project name.
+    var longest: usize = 0;
+    var i: usize = 0;
+    while (i < projects.len) : (i += 1) {
+        const name_len = projects[i].name.len;
+        if (name_len > longest) longest = name_len;
+    }
+
+    var width: usize = longest + 6; // "[n] " plus some slack
+    if (width < PROJECT_PANEL_MIN_WIDTH) width = PROJECT_PANEL_MIN_WIDTH;
+
+    const max_panel = @min(PROJECT_PANEL_MAX_WIDTH, term_width / 3);
+    if (width > max_panel) width = max_panel;
+
+    // Keep the main list from becoming absurdly narrow.
+    if (term_width <= width + PROJECT_PANEL_MIN_LIST_WIDTH) {
+        return 0;
+    }
+
+    return width;
 }
 
 
