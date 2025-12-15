@@ -7,66 +7,101 @@ pub const Task = store.Task;
 pub const Status = store.Status;
 pub const FileImage = store.FileImage;
 
-pub const ProjectEntry = struct {
-    /// Slice into FileImage.buf
-    name: []const u8,
-    /// Number of TODO tasks that mention this project at least once
-    count_todo: u32,
+const ProjectAgg = struct {
+    count_todo: usize,
+    count_done: usize,
 };
 
-fn buildProjectIndex(
-    allocator: mem.Allocator,
-    img: *const FileImage,
+
+const ProjectMap = std.StringHashMap(ProjectAgg);
+
+pub const ProjectEntry = struct {
+    name: []const u8,   // slice into existing task.text storage
+    count_todo: usize,
+    count_done: usize,
+};
+
+
+fn buildProjectsIndex(
+    allocator: std.mem.Allocator,
+    todo_img: *const store.FileImage,
+    done_img: *const store.FileImage,
 ) ![]ProjectEntry {
-    var list = std.ArrayList(ProjectEntry).init(allocator);
-    errdefer list.deinit();
+    var project_map = ProjectMap.init(allocator);
+    defer project_map.deinit();
 
-    var i: usize = 0;
-    while (i < img.tasks.len) : (i += 1) {
-        const t = img.tasks[i];
+    const Helper = struct {
+        fn addImage(
+            pm: *ProjectMap,
+            img: *const store.FileImage,
+            is_todo: bool,
+        ) !void {
+            const tasks = img.tasks;
+            const spans = img.spans;
+            const buf = img.buf;
 
-        // Collect distinct +tags for this single task.
-        var tags: [16][]const u8 = undefined;
-        var tag_count: usize = 0;
-        store.collectTags(t.text, '+', &tags, &tag_count);
+            var ti: usize = 0;
+            while (ti < tasks.len) : (ti += 1) {
+                const t = tasks[ti];
 
-        var ti: usize = 0;
-        while (ti < tag_count) : (ti += 1) {
-            const tag = tags[ti];
+                var k: usize = 0;
+                while (k < t.proj_count) : (k += 1) {
+                    const span_index = t.proj_first + k;
+                    if (span_index >= spans.len) break;
 
-            var found = false;
-            var pj: usize = 0;
-            while (pj < list.items.len) : (pj += 1) {
-                if (std.mem.eql(u8, list.items[pj].name, tag)) {
-                    list.items[pj].count_todo += 1;
-                    found = true;
-                    break;
+                    const sp = spans[span_index];
+                    const start: usize = sp.start;
+                    const end: usize = start + sp.len;
+                    if (end > buf.len) continue; // defensive
+
+                    const name = buf[start..end];
+
+                    const gop = try pm.getOrPut(name);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = .{
+                            .count_todo = 0,
+                            .count_done = 0,
+                        };
+                    }
+
+                    if (is_todo) {
+                        gop.value_ptr.count_todo += 1;
+                    } else {
+                        gop.value_ptr.count_done += 1;
+                    }
                 }
             }
-
-            if (!found) {
-                try list.append(.{
-                    .name = tag,
-                    .count_todo = 1,
-                });
-            }
         }
+    };
+
+    try Helper.addImage(&project_map, todo_img, true);
+    try Helper.addImage(&project_map, done_img, false);
+
+    const count = project_map.count();
+    const entries = try allocator.alloc(ProjectEntry, count);
+
+    var it = project_map.iterator();
+    var i: usize = 0;
+    while (it.next()) |e| {
+        entries[i] = .{
+            .name = e.key_ptr.*,          // slice into FileImage.buf
+            .count_todo = e.value_ptr.count_todo,
+            .count_done = e.value_ptr.count_done,
+        };
+        i += 1;
     }
 
-    // Stable order: lexicographic by project name.
-    std.sort.pdq(ProjectEntry, list.items, {}, struct {
-        fn lessThan(ctx: void, a: ProjectEntry, b: ProjectEntry) bool {
-            _ = ctx;
-            return std.mem.lessThan(u8, a.name, b.name);
-        }
-    }.lessThan);
-
-    return try list.toOwnedSlice();
+    return entries;
 }
 
 pub const TaskIndex = struct {
     todo_img: FileImage,
     done_img: FileImage,
+
+    // Views
+    todo: []const Task,
+    done: []const Task,
+
     projects: []ProjectEntry,
 
     pub fn todoSlice(self: *const TaskIndex) []const Task {
@@ -98,11 +133,14 @@ pub const TaskIndex = struct {
             tmp.deinit(allocator);
         }
 
-        const projects = try buildProjectIndex(allocator, &todo_img);
+
+        const projects = try buildProjectsIndex(allocator, &todo_img, &done_img);
 
         return TaskIndex{
             .todo_img = todo_img,
             .done_img = done_img,
+            .todo = todo_img.tasks,
+            .done = done_img.tasks,
             .projects = projects,
         };
     }
@@ -113,13 +151,32 @@ pub const TaskIndex = struct {
         todo_file: fs.File,
         done_file: fs.File,
     ) !void {
-        self.deinit(allocator);
-        self.* = try TaskIndex.load(allocator, todo_file, done_file);
+        // free old images + project list
+        self.todo_img.deinit(allocator);
+        self.done_img.deinit(allocator);
+        allocator.free(self.projects);
+
+        // reload from disk using the *same* loader as in .load
+        var todo_img = try store.loadFile(allocator, todo_file);
+        errdefer todo_img.deinit(allocator);
+
+        var done_img = try store.loadFile(allocator, done_file);
+        errdefer done_img.deinit(allocator);
+
+        const projects = try buildProjectsIndex(allocator, &todo_img, &done_img);
+
+        self.todo_img = todo_img;
+        self.done_img = done_img;
+        self.todo = todo_img.tasks;
+        self.done = done_img.tasks;
+        self.projects = projects;
     }
 
     pub fn deinit(self: *TaskIndex, allocator: mem.Allocator) void {
+        allocator.free(self.projects);
         self.todo_img.deinit(allocator);
         self.done_img.deinit(allocator);
-        if (self.projects.len != 0) allocator.free(self.projects);
+        self.* = undefined;
     }
+
 };

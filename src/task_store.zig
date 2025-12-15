@@ -198,13 +198,71 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
         }
     }
 
-    parse_ok = true;
+    // At this point tasks[0..task_index] have text / meta, but proj/ctx fields
+    // are still zeroed. Now build the spans table by scanning text once.
+    var spans_list = std.ArrayList(Span){};
+    errdefer spans_list.deinit(allocator);
+
+    const buf_base: usize = @intFromPtr(buf.ptr);
+
+    var ti: usize = 0;
+    while (ti < task_index) : (ti += 1) {
+        const t_ptr = &tasks[ti];
+
+        var proj_tags: [16][]const u8 = undefined;
+        var proj_count: usize = 0;
+        var ctx_tags: [16][]const u8 = undefined;
+        var ctx_count: usize = 0;
+
+        collectTags(t_ptr.text, '+', &proj_tags, &proj_count);
+        collectTags(t_ptr.text, '#', &ctx_tags, &ctx_count);
+
+        // projects for this task
+        const proj_first = spans_list.items.len;
+        var j: usize = 0;
+        while (j < proj_count) : (j += 1) {
+            const tag = proj_tags[j];
+            const tag_ptr: usize = @intFromPtr(tag.ptr);
+            const off: usize = tag_ptr - buf_base;
+            if (off >= buf.len or off + tag.len > buf.len) continue;
+
+            try spans_list.append(allocator, .{
+                .start = @intCast(off),
+                .len = @intCast(tag.len),
+            });
+        }
+        const proj_last = spans_list.items.len;
+        t_ptr.proj_first = @intCast(proj_first);
+        t_ptr.proj_count = @intCast(proj_last - proj_first);
+
+        // contexts for this task
+        const ctx_first = spans_list.items.len;
+        j = 0;
+        while (j < ctx_count) : (j += 1) {
+            const tag = ctx_tags[j];
+            const tag_ptr: usize = @intFromPtr(tag.ptr);
+            const off: usize = tag_ptr - buf_base;
+            if (off >= buf.len or off + tag.len > buf.len) continue;
+
+            try spans_list.append(allocator, .{
+                .start = @intCast(off),
+                .len = @intCast(tag.len),
+            });
+        }
+        const ctx_last = spans_list.items.len;
+        t_ptr.ctx_first = @intCast(ctx_first);
+        t_ptr.ctx_count = @intCast(ctx_last - ctx_first);
+    }
+
     allocator.free(raw);
+
+    const spans_slice = try spans_list.toOwnedSlice(allocator);
+    parse_ok = true;
 
     return FileImage{
         .buf = buf,
         .tasks = tasks[0..task_index],
-        .spans = &[_]Span{},
+        .spans = spans_slice,
     };
 }
 

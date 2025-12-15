@@ -35,6 +35,13 @@ const PROJECT_PANEL_MIN_LIST_WIDTH: usize = 20;
 const PROJECT_PANEL_MIN_WIDTH: usize = 16;
 const PROJECT_PANEL_MAX_WIDTH: usize = 32;
 
+const PROJECT_PANE_MAX_WIDTH: usize = 24;
+const PROJECT_PANE_MIN_WIDTH: usize = 14;
+
+// Sidebar UI state; kept local to tui so UiState does not grow yet.
+var g_projects_focus: bool = false;
+var g_projects_selected: usize = 0;
+
 /// Event type for the libvaxis low-level loop.
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -682,6 +689,7 @@ pub fn run(
             .list => {
                 drawHeader(win);
                 drawCounts(win, ctx.index, ui);
+                drawProjectsPane(win, ctx.index);
                 drawTodoList(win, ctx.index, ui, list_cmd_active);
                 drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done, list_cmd_edit);
             },
@@ -726,6 +734,41 @@ fn handleListFocusKey(
     ui: *UiState,
     index: *const TaskIndex,
 ) bool {
+
+    const projects = index.projectsSlice();
+    const proj_len = projects.len;
+
+    // 'p' toggles focus on the projects sidebar when there is at least one project.
+    if (key.matches('p', .{})) {
+        if (proj_len != 0) {
+            g_projects_focus = !g_projects_focus;
+            if (g_projects_selected >= proj_len) {
+                g_projects_selected = proj_len - 1;
+            }
+        }
+        return true;
+    }
+
+    // When the sidebar has focus, j/k and arrows move inside it.
+    if (g_projects_focus and proj_len != 0) {
+        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            if (g_projects_selected + 1 < proj_len) {
+                g_projects_selected += 1;
+            }
+            return true;
+        }
+        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            if (g_projects_selected > 0) {
+                g_projects_selected -= 1;
+            }
+            return true;
+        }
+        // While focused on projects, we still allow H/L/Tab below to change
+        // which task list (todo/done) is active; the task navigation itself
+        // is suppressed because handleNavigation is not called when this
+        // function returns true.
+    }
+
     // Tab toggles between TODO and DONE.
     if (key.matches('\t', .{})) {
         const next_focus: ListKind = if (ui.focus == .todo) .done else .todo;
@@ -2373,6 +2416,74 @@ fn measureWrappedRowsForTask(task: Task, max_cols: usize) usize {
     return rows;
 }
 
+fn drawWrappedText(
+    win: vaxis.Window,
+    start_row: usize,
+    col_offset: usize,
+    max_rows: usize,
+    max_cols: usize,
+    text: []const u8,
+    style: vaxis.Style,
+) void {
+    if (text.len == 0 or max_rows == 0 or max_cols == 0) return;
+
+    const len = text.len;
+    var i: usize = 0;
+    var row_index: usize = 0;
+
+    while (i < len and row_index < max_rows and (start_row + row_index) < win.height) : (row_index += 1) {
+        const row: u16 = @intCast(start_row + row_index);
+
+        const line_start = i;
+        var last_space: ?usize = null;
+        var col_count: usize = 0;
+
+        // Determine how many bytes fit on this row.
+        while (i < len and col_count < max_cols) : (col_count += 1) {
+            const b = text[i];
+            if (isSpaceByte(b)) {
+                last_space = i;
+            }
+            i += 1;
+        }
+
+        var line_end = i;
+
+        if (i < len and col_count == max_cols) {
+            if (last_space) |sp| {
+                if (sp >= line_start) {
+                    line_end = sp;
+                    i = sp + 1;
+                }
+            }
+        }
+
+        // Skip leading spaces for what we actually draw on this line.
+        var seg_start = line_start;
+        while (seg_start < line_end and isSpaceByte(text[seg_start])) {
+            seg_start += 1;
+        }
+
+        var col: usize = col_offset;
+        var j: usize = seg_start;
+        while (j < line_end and col < win.width) : (j += 1) {
+            const g = text[j .. j + 1];
+            const cell: Cell = .{
+                .char = .{ .grapheme = g, .width = 1 },
+                .style = style,
+            };
+            _ = win.writeCell(@intCast(col), row, cell);
+            col += 1;
+        }
+
+        // Skip leading spaces at the start of the next row.
+        while (i < len and isSpaceByte(text[i])) {
+            i += 1;
+        }
+    }
+}
+
+
 /// Draw `<task.text>` optionally followed by ` d:[YYYY-MM-DD HH:MM]`,
 /// wrapped into `max_rows` rows and `max_cols` columns, starting at
 /// (start_row, col_offset).
@@ -2702,6 +2813,226 @@ fn computeProjectPanelWidth(
 }
 
 
+fn computeProjectsPaneWidth(term_width: usize) usize {
+    // If the terminal is too narrow, disable the sidebar entirely.
+    if (term_width < PROJECT_PANE_MIN_WIDTH + 8) return 0;
+
+    const one_third = term_width / 3;
+    var w = if (one_third < PROJECT_PANE_MAX_WIDTH) one_third else PROJECT_PANE_MAX_WIDTH;
+    if (w < PROJECT_PANE_MIN_WIDTH) w = PROJECT_PANE_MIN_WIDTH;
+    return w;
+}
+
+
+fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex) void {
+    const term_width: usize = @intCast(win.width);
+    const term_height: usize = @intCast(win.height);
+    if (term_height == 0 or term_width == 0) return;
+
+    const pane_width = computeProjectsPaneWidth(term_width);
+    if (pane_width == 0 or pane_width >= term_width) return;
+
+    const right_col: usize = pane_width - 1;
+    const projects = index.projectsSlice();
+
+    const base_style: vaxis.Style = .{};
+    const header_style: vaxis.Style = .{
+        .bold = true,
+        .fg = .{ .rgb = .{ 200, 200, 255 } },
+    };
+    const selected_style: vaxis.Style = .{
+        .bold = true,
+        .fg = .{ .rgb = .{ 220, 220, 255 } },
+    };
+
+    // Vertical separator at the right edge of the pane.
+    var row: usize = 0;
+    while (row < term_height) : (row += 1) {
+        const cell: Cell = .{
+            .char = .{ .grapheme = "│", .width = 1 },
+            .style = base_style,
+        };
+        _ = win.writeCell(@intCast(right_col), @intCast(row), cell);
+    }
+
+    // Header "Projects" centered within the pane, not across the whole screen.
+    const header = "Projects";
+    const header_len: usize = header.len;
+
+    const usable_cols = if (right_col > 0) right_col else 0;
+    var start_col: usize = 0;
+    if (usable_cols > header_len) {
+        start_col = (usable_cols - header_len) / 2;
+    }
+
+    const header_row: usize = LIST_START_ROW;
+    var col: usize = start_col;
+    var i: usize = 0;
+    while (i < header_len and col < usable_cols) : (i += 1) {
+        const g = header[i .. i + 1];
+        const cell: Cell = .{
+            .char = .{ .grapheme = g, .width = 1 },
+            .style = header_style,
+        };
+        _ = win.writeCell(@intCast(col), @intCast(header_row), cell);
+        col += 1;
+    }
+
+    if (projects.len == 0) return;
+
+    if (g_projects_selected >= projects.len) {
+        g_projects_selected = projects.len - 1;
+    }
+
+    // List of "+project" entries, wrapped within the pane.
+    var proj_row: usize = header_row + 2;
+    if (proj_row >= term_height) return;
+
+    const max_text_width = if (right_col > 1) right_col - 1 else 0;
+    if (max_text_width == 0) return;
+
+    var idx: usize = 0;
+    while (idx < projects.len and proj_row < term_height) : (idx += 1) {
+        const entry = projects[idx];
+
+        var line_buf: [64]u8 = undefined;
+        var pos: usize = 0;
+
+        // Build "+name" into a local buffer; no uninitialized bytes are exposed.
+        line_buf[pos] = '+'; pos += 1;
+
+        if (entry.name.len != 0) {
+            const copy_len = @min(entry.name.len, line_buf.len - pos);
+            @memcpy(line_buf[pos .. pos + copy_len], entry.name[0..copy_len]);
+            pos += copy_len;
+        }
+
+        const line = line_buf[0..pos];
+
+        const style =
+            if (g_projects_focus and idx == g_projects_selected)
+                selected_style
+            else
+                base_style;
+
+        // One visual row per project for now; simple and predictable.
+        drawWrappedText(
+            win,
+            proj_row,
+            1,                // indent inside the pane
+            1,                // max_rows for this entry
+            max_text_width,
+            line,
+            style,
+        );
+
+        proj_row += 1;
+    }
+}
+
+
+fn drawProjectSidebar(
+    win: vaxis.Window,
+    index: *const TaskIndex,
+    list_width: usize,
+    panel_width: usize,
+    cmd_active: bool,
+) void {
+    const projects = index.projectsSlice();
+    if (projects.len == 0) return;
+
+    const height: usize = @intCast(win.height);
+    if (height <= LIST_START_ROW) return;
+
+    const term_width: usize = @intCast(win.width);
+    if (list_width >= term_width) return;
+
+    const panel_left: usize = list_width;
+    var panel_right_excl: usize = panel_left + panel_width;
+    if (panel_right_excl > term_width) panel_right_excl = term_width;
+    if (panel_right_excl <= panel_left) return;
+
+    const panel_cols: usize = panel_right_excl - panel_left;
+
+    const reserved_rows: usize =
+        if (cmd_active and height > LIST_START_ROW + 1) 1 else 0;
+    const viewport_height = height - LIST_START_ROW - reserved_rows;
+    if (viewport_height == 0) return;
+
+    const header_style: vaxis.Style = .{
+        .bold = true,
+        .fg = .{ .rgb = .{ 200, 200, 255 } },
+    };
+    const entry_style: vaxis.Style = .{
+        .fg = .{ .rgb = .{ 190, 190, 190 } },
+    };
+    const sep_style: vaxis.Style = .{
+        .fg = .{ .rgb = .{ 80, 80, 80 } },
+    };
+
+    // Vertical separator
+    const sep_col: u16 = @intCast(panel_left);
+    var y: u16 = @intCast(LIST_START_ROW);
+    while (y < win.height) : (y += 1) {
+        const bar = "│";
+        _ = win.writeCell(sep_col, y, .{
+            .char = .{ .grapheme = bar, .width = 1 },
+            .style = sep_style,
+        });
+    }
+
+    var row: usize = LIST_START_ROW;
+
+    // Header: "Projects"
+    if (viewport_height > 0) {
+        const header = "Projects";
+        var col = panel_left;
+        var i: usize = 0;
+        while (i < header.len and col < panel_right_excl) : (i += 1) {
+            const g = header[i .. i + 1];
+            _ = win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = g, .width = 1 },
+                .style = header_style,
+            });
+            col += 1;
+        }
+        row += 1;
+    }
+
+    var remaining_rows: usize = viewport_height;
+    if (remaining_rows > 0) remaining_rows -= 1;
+
+    var pi: usize = 0;
+    while (pi < projects.len and remaining_rows > 0 and row < height - reserved_rows) : (pi += 1) {
+        const entry = projects[pi];
+
+        var line_buf: [80]u8 = undefined;
+        const text = std.fmt.bufPrint(
+            &line_buf,
+            "[{d}] {s}",
+            .{ entry.count_todo, entry.name },
+        ) catch line_buf[0..0];
+
+        const needed_rows = measureWrappedRows(text, panel_cols);
+        if (needed_rows == 0) continue;
+        if (needed_rows > remaining_rows) break;
+
+        drawWrappedText(
+            win,
+            row,
+            panel_left,
+            needed_rows,
+            panel_cols,
+            text,
+            entry_style,
+        );
+
+        row += needed_rows;
+        remaining_rows -= needed_rows;
+    }
+}
+
+
 /// Render the currently focused list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
 fn drawTodoList(
@@ -2724,7 +3055,7 @@ fn drawTodoList(
 
     const term_height: usize = @intCast(win.height);
     const term_width: usize = @intCast(win.width);
-    if (term_height <= LIST_START_ROW) return;
+    if (term_height <= LIST_START_ROW or term_width == 0) return;
 
     const reserved_rows: usize =
         if (cmd_active and term_height > LIST_START_ROW + 1) 1 else 0;
@@ -2737,9 +3068,26 @@ fn drawTodoList(
         view.selected_index = tasks.len - 1;
     }
 
-    if (term_width <= 2) return;
-    const content_width: usize = term_width - 2;
+    const proj_pane_width = computeProjectsPaneWidth(term_width);
+
+    var arrow_col_usize: usize = 0;
+    var pad_col_usize: usize = 1;
+    var content_start_col_usize: usize = 2;
+
+    if (proj_pane_width != 0) {
+        arrow_col_usize = proj_pane_width;
+        pad_col_usize = proj_pane_width + 1;
+        content_start_col_usize = proj_pane_width + 2;
+    }
+
+    if (content_start_col_usize >= term_width) return;
+
+    const content_width: usize = term_width - content_start_col_usize;
     if (content_width <= STATUS_WIDTH) return;
+
+    const arrow_col: u16 = @intCast(arrow_col_usize);
+    const pad_col: u16 = @intCast(pad_col_usize);
+    const content_start_col: u16 = @intCast(content_start_col_usize);
 
     const dir = view.last_move;
     if (!isSelectionFullyVisible(view, tasks, viewport_height, content_width)) {
@@ -2758,42 +3106,36 @@ fn drawTodoList(
     var row: usize = LIST_START_ROW;
     var remaining_rows: usize = viewport_height;
 
-    const content_start_col: u16 = 2;
-
-    var idx = view.scroll_offset;
+    var idx: usize = view.scroll_offset;
     while (idx < tasks.len and remaining_rows > 0 and row < term_height) : (idx += 1) {
         const task = tasks[idx];
-
         const selected = (view.selected_index == idx);
         const style = if (selected) sel_style else base_style;
-
         const layout = computeLayout(task, content_width);
         const rows_needed = layout.rows;
         const prefix = layout.prefix;
 
-        if (rows_needed == 0) break;
-        if (rows_needed > remaining_rows) break;
+        if (rows_needed == 0 or rows_needed > remaining_rows) break;
 
         const row_u16: u16 = @intCast(row);
 
-        // column 0: ">" or space
-        if (term_width > 0) {
-            const g = if (selected) indicator_slice else space_slice;
-            _ = win.writeCell(0, row_u16, .{
+        // Arrow in the correct column band.
+        if (arrow_col < win.width) {
+            const g =
+                if (selected and !g_projects_focus) indicator_slice else space_slice;
+            _ = win.writeCell(arrow_col, row_u16, .{
                 .char = .{ .grapheme = g, .width = 1 },
                 .style = style,
             });
         }
-
-        // column 1: space
-        if (term_width > 1) {
-            _ = win.writeCell(1, row_u16, .{
+        if (pad_col < win.width) {
+            _ = win.writeCell(pad_col, row_u16, .{
                 .char = .{ .grapheme = space_slice, .width = 1 },
                 .style = style,
             });
         }
 
-        // status marker at content_start_col
+        // Status marker at content_start_col
         const status_text: []const u8 = switch (task.status) {
             .todo => "[ ]",
             .ongoing => "[@]",
@@ -2810,7 +3152,6 @@ fn drawTodoList(
             });
             col_status += 1;
         }
-        // trailing space after "[ ]"
         if (col_status < win.width) {
             _ = win.writeCell(col_status, row_u16, .{
                 .char = .{ .grapheme = space_slice, .width = 1 },
@@ -2819,10 +3160,6 @@ fn drawTodoList(
             col_status += 1;
         }
 
-        // priority, only if > 0.
-        // When prio == 0 this leaves a single gap: "[ ] <text>".
-        // When prio > 0 this yields "[ ] Pn <text>" or "[ ] Pnnn <text>"
-        // with the logical width tracked by prefixWidthForPrio().
         var text_start_col: u16 = col_status;
         if (task.priority != 0 and col_status < win.width) {
             text_start_col = drawPriorityPrefix(
@@ -2834,7 +3171,6 @@ fn drawTodoList(
             );
         }
 
-        // draw wrapped task text starting at text_start_col
         if (content_width > prefix) {
             const text_width = content_width - prefix;
             drawWrappedTask(
