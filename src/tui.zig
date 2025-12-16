@@ -74,6 +74,13 @@ inline fn graphemeFromByte(b: u8) []const u8 {
     return ascii_graphemes[b][0..1];
 }
 
+fn projectsForFocus(index: *const TaskIndex, focus: ListKind) []const ProjectEntry {
+    return switch (focus) {
+        .todo => index.projectsTodoSlice(),
+        .done => index.projectsDoneSlice(),
+    };
+}
+
 
 fn insertIntoBuffer(buf: []u8, len: *usize, cursor: *usize, ch: u8) void {
     if (len.* >= buf.len) return;
@@ -689,7 +696,7 @@ pub fn run(
             .list => {
                 drawHeader(win);
                 drawCounts(win, ctx.index, ui);
-                drawProjectsPane(win, ctx.index);
+                drawProjectsPane(win, ctx.index, ui.focus);
                 drawTodoList(win, ctx.index, ui, list_cmd_active);
                 drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done, list_cmd_edit);
             },
@@ -735,7 +742,10 @@ fn handleListFocusKey(
     index: *const TaskIndex,
 ) bool {
 
-    const projects = index.projectsSlice();
+    const projects = switch (ui.focus) {
+        .todo => index.projectsTodoSlice(),
+        .done => index.projectsDoneSlice(),
+    };
     const proj_len = projects.len;
 
     // 'p' toggles focus on the projects sidebar when there is at least one project.
@@ -2780,8 +2790,10 @@ fn recomputeScrollOffsetForSelection(
 fn computeProjectPanelWidth(
     win: vaxis.Window,
     index: *const TaskIndex,
+    focus:ListKind,
 ) usize {
-    const projects = index.projectsSlice();
+
+    const projects = projectsForFocus(index,focus);
     if (projects.len == 0) return 0;
 
     const term_width: usize = @intCast(win.width);
@@ -2806,6 +2818,7 @@ fn computeProjectPanelWidth(
         return 0;
     }
 
+
     return width;
 }
 
@@ -2821,7 +2834,7 @@ fn computeProjectsPaneWidth(term_width: usize) usize {
 }
 
 
-fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex) void {
+fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus:ListKind) void {
     const term_width: usize = @intCast(win.width);
     const term_height: usize = @intCast(win.height);
     if (term_height == 0 or term_width == 0) return;
@@ -2830,7 +2843,8 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex) void {
     if (pane_width == 0 or pane_width >= term_width) return;
 
     const right_col: usize = pane_width - 1;
-    const projects = index.projectsSlice();
+
+    const projects = projectsForFocus(index, focus);
 
     const base_style: vaxis.Style = .{};
     const header_style: vaxis.Style = .{
@@ -2925,108 +2939,6 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex) void {
         );
 
         proj_row += 1;
-    }
-}
-
-
-fn drawProjectSidebar(
-    win: vaxis.Window,
-    index: *const TaskIndex,
-    list_width: usize,
-    panel_width: usize,
-    cmd_active: bool,
-) void {
-    const projects = index.projectsSlice();
-    if (projects.len == 0) return;
-
-    const height: usize = @intCast(win.height);
-    if (height <= LIST_START_ROW) return;
-
-    const term_width: usize = @intCast(win.width);
-    if (list_width >= term_width) return;
-
-    const panel_left: usize = list_width;
-    var panel_right_excl: usize = panel_left + panel_width;
-    if (panel_right_excl > term_width) panel_right_excl = term_width;
-    if (panel_right_excl <= panel_left) return;
-
-    const panel_cols: usize = panel_right_excl - panel_left;
-
-    const reserved_rows: usize =
-        if (cmd_active and height > LIST_START_ROW + 1) 1 else 0;
-    const viewport_height = height - LIST_START_ROW - reserved_rows;
-    if (viewport_height == 0) return;
-
-    const header_style: vaxis.Style = .{
-        .bold = true,
-        .fg = .{ .rgb = .{ 200, 200, 255 } },
-    };
-    const entry_style: vaxis.Style = .{
-        .fg = .{ .rgb = .{ 190, 190, 190 } },
-    };
-    const sep_style: vaxis.Style = .{
-        .fg = .{ .rgb = .{ 80, 80, 80 } },
-    };
-
-    // Vertical separator
-    const sep_col: u16 = @intCast(panel_left);
-    var y: u16 = @intCast(LIST_START_ROW);
-    while (y < win.height) : (y += 1) {
-        const bar = "│";
-        _ = win.writeCell(sep_col, y, .{
-            .char = .{ .grapheme = bar, .width = 1 },
-            .style = sep_style,
-        });
-    }
-
-    var row: usize = LIST_START_ROW;
-
-    // Header: "Projects"
-    if (viewport_height > 0) {
-        const header = "Projects";
-        var col = panel_left;
-        var i: usize = 0;
-        while (i < header.len and col < panel_right_excl) : (i += 1) {
-            const g = header[i .. i + 1];
-            _ = win.writeCell(@intCast(col), @intCast(row), .{
-                .char = .{ .grapheme = g, .width = 1 },
-                .style = header_style,
-            });
-            col += 1;
-        }
-        row += 1;
-    }
-
-    var remaining_rows: usize = viewport_height;
-    if (remaining_rows > 0) remaining_rows -= 1;
-
-    var pi: usize = 0;
-    while (pi < projects.len and remaining_rows > 0 and row < height - reserved_rows) : (pi += 1) {
-        const entry = projects[pi];
-
-        var line_buf: [80]u8 = undefined;
-        const text = std.fmt.bufPrint(
-            &line_buf,
-            "[{d}] {s}",
-            .{ entry.count_todo, entry.name },
-        ) catch line_buf[0..0];
-
-        const needed_rows = measureWrappedRows(text, panel_cols);
-        if (needed_rows == 0) continue;
-        if (needed_rows > remaining_rows) break;
-
-        drawWrappedText(
-            win,
-            row,
-            panel_left,
-            needed_rows,
-            panel_cols,
-            text,
-            entry_style,
-        );
-
-        row += needed_rows;
-        remaining_rows -= needed_rows;
     }
 }
 

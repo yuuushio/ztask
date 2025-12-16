@@ -22,78 +22,47 @@ pub const ProjectEntry = struct {
 };
 
 
-fn buildProjectsIndex(
+fn buildProjectsIndexForTasks(
     allocator: std.mem.Allocator,
-    todo_img: *const store.FileImage,
-    done_img: *const store.FileImage,
+    tasks: []const store.Task,
 ) ![]ProjectEntry {
     var project_map = ProjectMap.init(allocator);
     defer project_map.deinit();
 
-    const Helper = struct {
-        fn addImage(
-            pm: *ProjectMap,
-            img: *const store.FileImage,
-            is_todo: bool,
-        ) !void {
-            const tasks = img.tasks;
+    var ti: usize = 0;
+    while (ti < tasks.len) : (ti += 1) {
+        const t = tasks[ti];
 
-            var ti: usize = 0;
-            while (ti < tasks.len) : (ti += 1) {
-                const t = tasks[ti];
+        var proj_tags: [16][]const u8 = undefined;
+        var proj_count: usize = 0;
+        store.collectTags(t.text, '+', &proj_tags, &proj_count);
 
-                // Collect unique "+project" tags for this task
-                var proj_tags: [16][]const u8 = undefined;
-                var proj_count: usize = 0;
-                store.collectTags(t.text, '+', &proj_tags, &proj_count);
+        var k: usize = 0;
+        while (k < proj_count) : (k += 1) {
+            const name = proj_tags[k];
+            if (name.len == 0) continue;
 
-                var k: usize = 0;
-                while (k < proj_count) : (k += 1) {
-                    const name = proj_tags[k]; // slice into FileImage.buf
-                    if (name.len == 0) continue;
-
-                    const gop = try pm.getOrPut(name);
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = .{
-                            .count_todo = 0,
-                            .count_done = 0,
-                        };
-                    }
-
-                    if (is_todo) {
-                        gop.value_ptr.count_todo += 1;
-                    } else {
-                        gop.value_ptr.count_done += 1;
-                    }
-                }
+            const gop = try project_map.getOrPut(name);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{ .count_todo = 0, .count_done = 0 };
             }
+
+            if (t.status == .done) gop.value_ptr.count_done += 1 else gop.value_ptr.count_todo += 1;
         }
-    };
+    }
 
-    try Helper.addImage(&project_map, todo_img, true);
-    try Helper.addImage(&project_map, done_img, false);
-
-    const count = project_map.count();
-    const entries = try allocator.alloc(ProjectEntry, count);
+    const entries = try allocator.alloc(ProjectEntry, project_map.count());
 
     var it = project_map.iterator();
     var i: usize = 0;
     while (it.next()) |e| {
-
-        const name = e.key_ptr.*;
-        const agg = e.value_ptr.*;
-        std.debug.print("project[{d}] = '{s}'  todo={d} done={d}\n",
-            .{ i, name, agg.count_todo, agg.count_done });
         entries[i] = .{
-            .name = e.key_ptr.*,          // slice into FileImage.buf
+            .name = e.key_ptr.*,
             .count_todo = e.value_ptr.count_todo,
             .count_done = e.value_ptr.count_done,
         };
         i += 1;
     }
-
-
-
     return entries;
 }
 
@@ -105,7 +74,8 @@ pub const TaskIndex = struct {
     todo: []const Task,
     done: []const Task,
 
-    projects: []ProjectEntry,
+    projects_todo: []ProjectEntry,
+    projects_done: []ProjectEntry,
 
     pub fn todoSlice(self: *const TaskIndex) []const Task {
         return self.todo_img.tasks;
@@ -115,8 +85,11 @@ pub const TaskIndex = struct {
         return self.done_img.tasks;
     }
 
-    pub fn projectsSlice(self: *const TaskIndex) []const ProjectEntry {
-        return self.projects;
+    pub fn projectsTodoSlice(self: *const TaskIndex) []const ProjectEntry {
+        return self.projects_todo;
+    }
+    pub fn projectsDoneSlice(self: *const TaskIndex) []const ProjectEntry {
+        return self.projects_done;
     }
 
     pub fn load(
@@ -137,23 +110,19 @@ pub const TaskIndex = struct {
         }
 
 
-        const projects = try buildProjectsIndex(allocator, &todo_img, &done_img);
+        const projects_todo = try buildProjectsIndexForTasks(allocator, todo_img.tasks);
+        errdefer allocator.free(projects_todo);
 
-        // DEBUG: verify projects just before TaskIndex is constructed
-        std.debug.print("TaskIndex.load: projects from indexer:\n", .{});
-        for (projects, 0..) |p, idx| {
-            std.debug.print(
-                "  [{d}] name='{s}'  todo={d} done={d}\n",
-                .{ idx, p.name, p.count_todo, p.count_done },
-            );
-        }
+        const projects_done = try buildProjectsIndexForTasks(allocator, done_img.tasks);
+        errdefer allocator.free(projects_done);
 
         return TaskIndex{
             .todo_img = todo_img,
             .done_img = done_img,
             .todo = todo_img.tasks,
             .done = done_img.tasks,
-            .projects = projects,
+            .projects_todo = projects_todo,
+            .projects_done = projects_done,
         };
     }
 
@@ -163,29 +132,38 @@ pub const TaskIndex = struct {
         todo_file: fs.File,
         done_file: fs.File,
     ) !void {
-        // free old images + project list
+        // free old project lists first
+        allocator.free(self.projects_todo);
+        allocator.free(self.projects_done);
+
+        // free old images
         self.todo_img.deinit(allocator);
         self.done_img.deinit(allocator);
-        allocator.free(self.projects);
 
-        // reload from disk using the *same* loader as in .load
+        // reload
         var todo_img = try store.loadFile(allocator, todo_file);
         errdefer todo_img.deinit(allocator);
 
         var done_img = try store.loadFile(allocator, done_file);
         errdefer done_img.deinit(allocator);
 
-        const projects = try buildProjectsIndex(allocator, &todo_img, &done_img);
+        const projects_todo = try buildProjectsIndexForTasks(allocator, todo_img.tasks);
+        errdefer allocator.free(projects_todo);
+
+        const projects_done = try buildProjectsIndexForTasks(allocator, done_img.tasks);
+        errdefer allocator.free(projects_done);
 
         self.todo_img = todo_img;
         self.done_img = done_img;
         self.todo = todo_img.tasks;
         self.done = done_img.tasks;
-        self.projects = projects;
+        self.projects_todo = projects_todo;
+        self.projects_done = projects_done;
     }
 
     pub fn deinit(self: *TaskIndex, allocator: mem.Allocator) void {
-        allocator.free(self.projects);
+        allocator.free(self.projects_todo);
+        allocator.free(self.projects_done);
         self.todo_img.deinit(allocator);
         self.done_img.deinit(allocator);
         self.* = undefined;
