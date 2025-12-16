@@ -2862,7 +2862,7 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex) void {
         start_col = (usable_cols - header_len) / 2;
     }
 
-    const header_row: usize = LIST_START_ROW;
+    const header_row: usize = if (term_height > 2) 2 else 0;
     var col: usize = start_col;
     var i: usize = 0;
     while (i < header_len and col < usable_cols) : (i += 1) {
