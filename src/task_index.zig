@@ -29,9 +29,13 @@ fn buildProjectsIndexForTasks(
     var project_map = ProjectMap.init(allocator);
     defer project_map.deinit();
 
+    var all_todo: usize = 0;
+    var all_done: usize = 0;
+
     var ti: usize = 0;
     while (ti < tasks.len) : (ti += 1) {
         const t = tasks[ti];
+        if (t.status == .done) all_done += 1 else all_todo += 1;
 
         var proj_tags: [16][]const u8 = undefined;
         var proj_count: usize = 0;
@@ -46,15 +50,21 @@ fn buildProjectsIndexForTasks(
             if (!gop.found_existing) {
                 gop.value_ptr.* = .{ .count_todo = 0, .count_done = 0 };
             }
-
             if (t.status == .done) gop.value_ptr.count_done += 1 else gop.value_ptr.count_todo += 1;
         }
     }
 
-    const entries = try allocator.alloc(ProjectEntry, project_map.count());
+    const entries = try allocator.alloc(ProjectEntry, project_map.count() + 1);
+
+    // index 0 = ALL (no filter)
+    entries[0] = .{
+        .name = "all",
+        .count_todo = all_todo,
+        .count_done = all_done,
+    };
 
     var it = project_map.iterator();
-    var i: usize = 0;
+    var i: usize = 1;
     while (it.next()) |e| {
         entries[i] = .{
             .name = e.key_ptr.*,
@@ -63,6 +73,7 @@ fn buildProjectsIndexForTasks(
         };
         i += 1;
     }
+
     return entries;
 }
 

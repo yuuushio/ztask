@@ -40,7 +40,14 @@ const PROJECT_PANE_MIN_WIDTH: usize = 14;
 
 // Sidebar UI state; kept local to tui so UiState does not grow yet.
 var g_projects_focus: bool = false;
-var g_projects_selected: usize = 0;
+
+// 0 means "all"
+var g_projects_selected_todo: usize = 0;
+var g_projects_selected_done: usize = 0;
+
+// visible task indices (into the underlying todo/done slices)
+var g_visible_todo = std.ArrayListUnmanaged(usize){};
+var g_visible_done = std.ArrayListUnmanaged(usize){};
 
 /// Event type for the libvaxis low-level loop.
 const Event = union(enum) {
@@ -78,6 +85,100 @@ fn projectsForFocus(index: *const TaskIndex, focus: ListKind) []const ProjectEnt
     return switch (focus) {
         .todo => index.projectsTodoSlice(),
         .done => index.projectsDoneSlice(),
+    };
+}
+
+fn selectedProjectPtr(focus: ListKind) *usize {
+    return switch (focus) {
+        .todo => &g_projects_selected_todo,
+        .done => &g_projects_selected_done,
+    };
+}
+
+fn selectedProjectName(index: *const TaskIndex, focus: ListKind) []const u8 {
+    const projects = projectsForFocus(index, focus);
+    if (projects.len == 0) return &[_]u8{};
+
+    const sel = selectedProjectPtr(focus);
+    if (sel.* >= projects.len) sel.* = projects.len - 1;
+
+    // entry 0 is "all" -> no filter
+    if (sel.* == 0) return &[_]u8{};
+    return projects[sel.*].name;
+}
+
+// Uses spans precomputed in loadFile; no rescanning strings every frame.
+fn taskHasProject(img: *const store.FileImage, task: store.Task, project: []const u8) bool {
+    if (project.len == 0) return true;
+
+    const first: usize = @intCast(task.proj_first);
+    const count: usize = @intCast(task.proj_count);
+    if (count == 0) return false;
+    if (first + count > img.spans.len) return false;
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const sp = img.spans[first + i];
+        const start: usize = @intCast(sp.start);
+        const len: usize = @intCast(sp.len);
+        if (start + len > img.buf.len) continue;
+
+        const name = img.buf[start .. start + len];
+        if (std.mem.eql(u8, name, project)) return true;
+    }
+
+    return false;
+}
+
+fn rebuildVisibleFor(
+    allocator: std.mem.Allocator,
+    index: *const TaskIndex,
+    focus: ListKind,
+) !void {
+    const project = selectedProjectName(index, focus);
+
+    switch (focus) {
+        .todo => {
+            g_visible_todo.clearRetainingCapacity();
+            const img = &index.todo_img;
+            try g_visible_todo.ensureTotalCapacity(allocator, img.tasks.len);
+
+            for (img.tasks, 0..) |t, ti| {
+                if (taskHasProject(img, t, project)) {
+                    try g_visible_todo.append(allocator, ti);
+                }
+            }
+        },
+        .done => {
+            g_visible_done.clearRetainingCapacity();
+            const img = &index.done_img;
+            try g_visible_done.ensureTotalCapacity(allocator, img.tasks.len);
+
+            for (img.tasks, 0..) |t, ti| {
+                if (taskHasProject(img, t, project)) {
+                    try g_visible_done.append(allocator, ti);
+                }
+            }
+        },
+    }
+}
+
+fn rebuildVisibleAll(allocator: std.mem.Allocator, index: *const TaskIndex) !void {
+    try rebuildVisibleFor(allocator, index, .todo);
+    try rebuildVisibleFor(allocator, index, .done);
+}
+
+fn visibleLenForFocus(focus: ListKind) usize {
+    return switch (focus) {
+        .todo => g_visible_todo.items.len,
+        .done => g_visible_done.items.len,
+    };
+}
+
+fn visibleIndicesForFocus(focus: ListKind) []const usize {
+    return switch (focus) {
+        .todo => g_visible_todo.items,
+        .done => g_visible_done.items,
     };
 }
 
@@ -607,6 +708,10 @@ pub fn run(
     var vx = try vaxis.init(allocator, .{});
     defer vx.deinit(allocator, tty.writer());
 
+
+    defer g_visible_todo.deinit(allocator);
+    defer g_visible_done.deinit(allocator);
+
     var view: AppView = .list;
     var editor = EditorState.init();
 
@@ -641,6 +746,8 @@ pub fn run(
 
     try processRepeats(ctx, allocator);
 
+    try rebuildVisibleAll(allocator, ctx.index);
+
     var running = true;
     while (running) {
         const event = loop.nextEvent();
@@ -671,7 +778,7 @@ pub fn run(
                                 list_cmd_active = true;
                                 list_cmd_new = false;
                                 list_cmd_done = false;
-                            } else if (!handleListFocusKey(key, ui, ctx.index)) {
+                            } else if (!(try handleListFocusKey(key, ui, ctx.index, allocator))) {
 
                                 handleNavigation(&vx, ctx.index, ui, key);
                             }
@@ -740,43 +847,62 @@ fn handleListFocusKey(
     key: vaxis.Key,
     ui: *UiState,
     index: *const TaskIndex,
-) bool {
-
-    const projects = switch (ui.focus) {
-        .todo => index.projectsTodoSlice(),
-        .done => index.projectsDoneSlice(),
-    };
+    allocator: std.mem.Allocator,
+) !bool {
+    const projects = projectsForFocus(index, ui.focus);
     const proj_len = projects.len;
 
     // 'p' toggles focus on the projects sidebar when there is at least one project.
     if (key.matches('p', .{})) {
         if (proj_len != 0) {
             g_projects_focus = !g_projects_focus;
-            if (g_projects_selected >= proj_len) {
-                g_projects_selected = proj_len - 1;
-            }
+
+            const sel = selectedProjectPtr(ui.focus);
+            if (sel.* >= proj_len) sel.* = proj_len - 1;
         }
         return true;
     }
 
     // When the sidebar has focus, j/k and arrows move inside it.
     if (g_projects_focus and proj_len != 0) {
+        const sel = selectedProjectPtr(ui.focus);
+
         if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-            if (g_projects_selected + 1 < proj_len) {
-                g_projects_selected += 1;
+            if (sel.* + 1 < proj_len) {
+                sel.* += 1;
+                try rebuildVisibleFor(allocator, index, ui.focus);
+
+                var view = ui.activeView();
+                const vlen = visibleLenForFocus(ui.focus);
+                if (vlen == 0) {
+                    view.selected_index = 0;
+                    view.scroll_offset = 0;
+                    view.last_move = 0;
+                } else if (view.selected_index >= vlen) {
+                    view.selected_index = vlen - 1;
+                }
             }
             return true;
         }
+
         if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-            if (g_projects_selected > 0) {
-                g_projects_selected -= 1;
+            if (sel.* > 0) {
+                sel.* -= 1;
+                try rebuildVisibleFor(allocator, index, ui.focus);
+
+                var view = ui.activeView();
+                const vlen = visibleLenForFocus(ui.focus);
+                if (vlen == 0) {
+                    view.selected_index = 0;
+                    view.scroll_offset = 0;
+                    view.last_move = 0;
+                } else if (view.selected_index >= vlen) {
+                    view.selected_index = vlen - 1;
+                }
             }
             return true;
         }
-        // While focused on projects, we still allow H/L/Tab below to change
-        // which task list (todo/done) is active; the task navigation itself
-        // is suppressed because handleNavigation is not called when this
-        // function returns true.
+        // fall through for Tab/H/L
     }
 
     // Tab toggles between TODO and DONE.
@@ -800,17 +926,14 @@ fn handleListFocusKey(
 }
 
 
-fn handleNavigation(vx: *vaxis.Vaxis, index: *const TaskIndex, ui: *UiState, key: vaxis.Key) void {
+fn handleNavigation(vx: *vaxis.Vaxis, _: *const TaskIndex, ui: *UiState, key: vaxis.Key) void {
     const win = vx.window();
     const term_height: usize = @intCast(win.height);
     if (term_height <= LIST_START_ROW) return;
 
     const viewport_height = term_height - LIST_START_ROW;
 
-    const active_len: usize = switch (ui.focus) {
-        .todo => index.todoSlice().len,
-        .done => index.doneSlice().len,
-    };
+    const active_len: usize = visibleLenForFocus(ui.focus);
 
     if (active_len == 0 or viewport_height == 0) return;
 
@@ -1725,23 +1848,26 @@ fn beginEditSelectedTask(
     editor: *EditorState,
     view: *AppView,
 ) !void {
-    const tasks: []const Task = switch (ui.focus) {
+    const tasks_all: []const Task = switch (ui.focus) {
         .todo => ctx.index.todoSlice(),
         .done => ctx.index.doneSlice(),
     };
-    if (tasks.len == 0) return;
+
+    const visible: []const usize = visibleIndicesForFocus(ui.focus);
+    if (visible.len == 0) return;
 
     var list_view = ui.activeView();
-    if (list_view.selected_index >= tasks.len) {
-        list_view.selected_index = tasks.len - 1;
+    if (list_view.selected_index >= visible.len) {
+        list_view.selected_index = visible.len - 1;
     }
-    const sel = list_view.selected_index;
 
-    const t = tasks[sel];
+    const sel_visible = list_view.selected_index;
+    const sel_original = visible[sel_visible];
+
+    const t = tasks_all[sel_original];
 
     var e = EditorState.fromTask(t);
-    e.editing_index = sel;
-    // if legacy data has weird status, force by focus
+    e.editing_index = sel_original; // ORIGINAL index into the file slice
     e.editing_status = if (ui.focus == .done) store.Status.done else store.Status.todo;
 
     editor.* = e;
@@ -1828,6 +1954,8 @@ fn saveExistingTask(
 
     try ctx.index.reload(allocator, ctx.todo_file.*, ctx.done_file.*);
 
+    try rebuildVisibleAll(allocator, ctx.index);
+
     ui.focus = if (editing_status == .done) .done else .todo;
 
     var list_view = ui.activeView();
@@ -1870,12 +1998,15 @@ fn markDone(
     ui: *UiState,
 ) !void {
     const todos = ctx.index.todoSlice();
-    if (todos.len == 0) return;
+    const visible = g_visible_todo.items;
+
+    if (visible.len == 0) return;
 
     var todo_view = &ui.todo;
-    if (todo_view.selected_index >= todos.len) return;
+    if (todo_view.selected_index >= visible.len) return;
 
-    const remove_index = todo_view.selected_index;
+    const sel_visible = todo_view.selected_index;
+    const remove_index = visible[sel_visible]; // ORIGINAL index into todos
     const original = todos[remove_index];
 
     var moved = original;
@@ -1890,22 +2021,30 @@ fn markDone(
     var done_file = ctx.done_file.*;
     try store.appendJsonTaskLine(allocator, &done_file, moved);
 
-    // Rewrite todo file without that index (unchanged from your current code).
     var todo_file = ctx.todo_file.*;
     try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, todos, remove_index);
 
     try ctx.index.reload(allocator, todo_file, done_file);
+    try rebuildVisibleAll(allocator, ctx.index);
 
     ui.focus = .todo;
-    const new_len = ctx.index.todoSlice().len;
-    if (new_len == 0) {
+
+    // keep selection at same visible row if possible
+    const new_vis_len = g_visible_todo.items.len;
+    if (new_vis_len == 0) {
         todo_view.selected_index = 0;
         todo_view.scroll_offset = 0;
-    } else if (remove_index >= new_len) {
-        todo_view.selected_index = new_len - 1;
-    } else {
-        todo_view.selected_index = remove_index;
+        todo_view.last_move = 0;
+        return;
     }
+
+    if (sel_visible >= new_vis_len) {
+        todo_view.selected_index = new_vis_len - 1;
+    } else {
+        todo_view.selected_index = sel_visible;
+    }
+
+    if (todo_view.scroll_offset >= new_vis_len) todo_view.scroll_offset = 0;
     todo_view.last_move = -1;
 }
 
@@ -1958,6 +2097,8 @@ fn saveNewTask(
     try store.appendJsonTaskLine(allocator, &file, new_task);
     try ctx.index.reload(allocator, file, ctx.done_file.*);
 
+    try rebuildVisibleAll(allocator, ctx.index);
+
     if (ctx.index.todoSlice().len != 0) {
         ui.focus = .todo;
         var todo_view = &ui.todo;
@@ -2007,6 +2148,8 @@ fn processRepeats(
         try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, move_index);
 
         try ctx.index.reload(allocator, todo_file, done_file);
+
+        try rebuildVisibleAll(allocator, ctx.index);
 
         // UI indices are clamped lazily in drawTodoList via activeView().
     }
@@ -2703,29 +2846,30 @@ fn computeLayout(task: Task, content_width: usize) TaskLayout {
 
 fn isSelectionFullyVisible(
     view: *const ListView,
-    tasks: []const Task,
+    tasks_all: []const Task,
+    visible: []const usize,
     viewport_height: usize,
     content_width: usize,
 ) bool {
-    if (tasks.len == 0 or viewport_height == 0 or content_width == 0) return true;
-    if (view.selected_index >= tasks.len) return false;
-    if (view.scroll_offset >= tasks.len) return false;
+    if (visible.len == 0 or viewport_height == 0 or content_width == 0) return true;
+
+    if (view.selected_index >= visible.len) return false;
+    if (view.scroll_offset >= visible.len) return false;
 
     var rows_used: usize = 0;
-    var idx = view.scroll_offset;
+    var vi: usize = view.scroll_offset;
 
-    while (idx < tasks.len and rows_used < viewport_height) : (idx += 1) {
-        const layout = computeLayout(tasks[idx], content_width);
-        if (layout.rows == 0) break;
+    while (vi < visible.len and rows_used < viewport_height) : (vi += 1) {
+        const task = tasks_all[visible[vi]];
+        var layout = computeLayout(task, content_width);
+        if (layout.rows == 0) layout.rows = 1;
 
         if (rows_used + layout.rows > viewport_height) {
-            if (idx == view.selected_index) return false;
+            if (vi == view.selected_index) return false;
             break;
         }
 
-        if (idx == view.selected_index) {
-            return true;
-        }
+        if (vi == view.selected_index) return true;
 
         rows_used += layout.rows;
     }
@@ -2733,57 +2877,57 @@ fn isSelectionFullyVisible(
     return false;
 }
 
-
 fn recomputeScrollOffsetForSelection(
     view: *ListView,
-    tasks: []const Task,
+    tasks_all: []const Task,
+    visible: []const usize,
     viewport_height: usize,
     content_width: usize,
     dir: i8,
 ) void {
-    if (tasks.len == 0 or viewport_height == 0 or content_width == 0) {
+    if (visible.len == 0 or viewport_height == 0 or content_width == 0) {
         view.scroll_offset = 0;
         view.selected_index = 0;
         return;
     }
 
-    if (view.selected_index >= tasks.len) {
-        view.selected_index = tasks.len - 1;
+    if (view.selected_index >= visible.len) {
+        view.selected_index = visible.len - 1;
     }
 
-    const sel = view.selected_index;
+    const sel_vi = view.selected_index;
+    const sel_task = tasks_all[visible[sel_vi]];
 
-    var sel_layout = computeLayout(tasks[sel], content_width);
+    var sel_layout = computeLayout(sel_task, content_width);
     if (sel_layout.rows == 0) sel_layout.rows = 1;
 
     if (sel_layout.rows > viewport_height) {
-        // One task taller than viewport, anchor on it.
-        view.scroll_offset = sel;
+        view.scroll_offset = sel_vi;
         return;
     }
 
     if (dir < 0) {
-        // Moving up: selected task becomes first visible.
-        view.scroll_offset = sel;
+        view.scroll_offset = sel_vi;
         return;
     }
 
-    // Moving down/neutral: pack as many tasks above as fit.
     var rows_total: usize = sel_layout.rows;
-    var start_idx: usize = sel;
+    var start_vi: usize = sel_vi;
 
-    while (start_idx > 0) {
-        const prev_idx = start_idx - 1;
-        var prev_layout = computeLayout(tasks[prev_idx], content_width);
+    while (start_vi > 0) {
+        const prev_vi = start_vi - 1;
+        const prev_task = tasks_all[visible[prev_vi]];
+
+        var prev_layout = computeLayout(prev_task, content_width);
         if (prev_layout.rows == 0) prev_layout.rows = 1;
 
         if (rows_total + prev_layout.rows > viewport_height) break;
 
         rows_total += prev_layout.rows;
-        start_idx = prev_idx;
+        start_vi = prev_vi;
     }
 
-    view.scroll_offset = start_idx;
+    view.scroll_offset = start_vi;
 }
 
 
@@ -2891,9 +3035,6 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus:ListKind) 
 
     if (projects.len == 0) return;
 
-    if (g_projects_selected >= projects.len) {
-        g_projects_selected = projects.len - 1;
-    }
 
     // List of "+project" entries, wrapped within the pane.
     var proj_row: usize = header_row + 2;
@@ -2902,6 +3043,10 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus:ListKind) 
     const max_text_width = if (right_col > 1) right_col - 1 else 0;
     if (max_text_width == 0) return;
 
+
+    const sel_ptr = selectedProjectPtr(focus);
+    if (sel_ptr.* >= projects.len) sel_ptr.* = projects.len - 1;
+
     var idx: usize = 0;
     while (idx < projects.len and proj_row < term_height) : (idx += 1) {
         const entry = projects[idx];
@@ -2909,35 +3054,32 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus:ListKind) 
         var line_buf: [64]u8 = undefined;
         var pos: usize = 0;
 
-        // Build "+name" into a local buffer; no uninitialized bytes are exposed.
-        line_buf[pos] = '+'; pos += 1;
+        if (idx == 0) {
+            // "all" entry, no '+'
+            const lit = "all";
+            const copy_len = @min(lit.len, line_buf.len);
+            @memcpy(line_buf[0..copy_len], lit[0..copy_len]);
+            pos = copy_len;
+        } else {
+            line_buf[pos] = '+';
+            pos += 1;
 
-        if (entry.name.len != 0) {
-            const copy_len = @min(entry.name.len, line_buf.len - pos);
-            @memcpy(line_buf[pos .. pos + copy_len], entry.name[0..copy_len]);
-            pos += copy_len;
+            if (entry.name.len != 0) {
+                const copy_len = @min(entry.name.len, line_buf.len - pos);
+                @memcpy(line_buf[pos .. pos + copy_len], entry.name[0..copy_len]);
+                pos += copy_len;
+            }
         }
 
         const line = line_buf[0..pos];
 
         const style =
-            if (g_projects_focus and idx == g_projects_selected)
+            if (g_projects_focus and idx == sel_ptr.*)
                 selected_style
             else
                 base_style;
 
-
-        // One visual row per project for now; simple and predictable.
-        drawWrappedText(
-            win,
-            proj_row,
-            1,                // indent inside the pane
-            1,                // max_rows for this entry
-            max_text_width,
-            line,
-            style,
-        );
-
+        drawWrappedText(win, proj_row, 1, 1, max_text_width, line, style);
         proj_row += 1;
     }
 }
@@ -2945,19 +3087,23 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus:ListKind) 
 
 /// Render the currently focused list with vim-style navigation.
 /// Selected row is bold and prefixed with "> ".
+
 fn drawTodoList(
     win: vaxis.Window,
     index: *const TaskIndex,
     ui: *UiState,
     cmd_active: bool,
 ) void {
-    const tasks: []const Task = switch (ui.focus) {
+    const tasks_all: []const Task = switch (ui.focus) {
         .todo => index.todoSlice(),
         .done => index.doneSlice(),
     };
+
+    const visible: []const usize = visibleIndicesForFocus(ui.focus);
     var view = ui.activeView();
 
-    if (tasks.len == 0) {
+    // empty because filter hid everything
+    if (visible.len == 0) {
         view.selected_index = 0;
         view.scroll_offset = 0;
         return;
@@ -2974,8 +3120,11 @@ fn drawTodoList(
     const viewport_height = term_height - LIST_START_ROW - reserved_rows;
     if (viewport_height == 0) return;
 
-    if (view.selected_index >= tasks.len) {
-        view.selected_index = tasks.len - 1;
+    if (view.selected_index >= visible.len) {
+        view.selected_index = visible.len - 1;
+    }
+    if (view.scroll_offset >= visible.len) {
+        view.scroll_offset = 0;
     }
 
     const proj_pane_width = computeProjectsPaneWidth(term_width);
@@ -3000,8 +3149,8 @@ fn drawTodoList(
     const content_start_col: u16 = @intCast(content_start_col_usize);
 
     const dir = view.last_move;
-    if (!isSelectionFullyVisible(view, tasks, viewport_height, content_width)) {
-        recomputeScrollOffsetForSelection(view, tasks, viewport_height, content_width, dir);
+    if (!isSelectionFullyVisible(view, tasks_all, visible, viewport_height, content_width)) {
+        recomputeScrollOffsetForSelection(view, tasks_all, visible, viewport_height, content_width, dir);
     }
 
     const indicator_slice = ">"[0..1];
@@ -3016,23 +3165,24 @@ fn drawTodoList(
     var row: usize = LIST_START_ROW;
     var remaining_rows: usize = viewport_height;
 
-    var idx: usize = view.scroll_offset;
-    while (idx < tasks.len and remaining_rows > 0 and row < term_height) : (idx += 1) {
-        const task = tasks[idx];
-        const selected = (view.selected_index == idx);
+    var vi: usize = view.scroll_offset;
+    while (vi < visible.len and remaining_rows > 0 and row < term_height) : (vi += 1) {
+        const task = tasks_all[visible[vi]];
+        const selected = (view.selected_index == vi);
         const style = if (selected) sel_style else base_style;
-        const layout = computeLayout(task, content_width);
+
+        var layout = computeLayout(task, content_width);
+        if (layout.rows == 0) layout.rows = 1;
+
         const rows_needed = layout.rows;
         const prefix = layout.prefix;
 
-        if (rows_needed == 0 or rows_needed > remaining_rows) break;
+        if (rows_needed > remaining_rows) break;
 
         const row_u16: u16 = @intCast(row);
 
-        // Arrow in the correct column band.
         if (arrow_col < win.width) {
-            const g =
-                if (selected and !g_projects_focus) indicator_slice else space_slice;
+            const g = if (selected and !g_projects_focus) indicator_slice else space_slice;
             _ = win.writeCell(arrow_col, row_u16, .{
                 .char = .{ .grapheme = g, .width = 1 },
                 .style = style,
@@ -3045,7 +3195,6 @@ fn drawTodoList(
             });
         }
 
-        // Status marker at content_start_col
         const status_text: []const u8 = switch (task.status) {
             .todo => "[ ]",
             .ongoing => "[@]",
