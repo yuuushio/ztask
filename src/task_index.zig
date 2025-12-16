@@ -37,24 +37,20 @@ fn buildProjectsIndex(
             is_todo: bool,
         ) !void {
             const tasks = img.tasks;
-            const spans = img.spans;
-            const buf = img.buf;
 
             var ti: usize = 0;
             while (ti < tasks.len) : (ti += 1) {
                 const t = tasks[ti];
 
+                // Collect unique "+project" tags for this task
+                var proj_tags: [16][]const u8 = undefined;
+                var proj_count: usize = 0;
+                store.collectTags(t.text, '+', &proj_tags, &proj_count);
+
                 var k: usize = 0;
-                while (k < t.proj_count) : (k += 1) {
-                    const span_index = t.proj_first + k;
-                    if (span_index >= spans.len) break;
-
-                    const sp = spans[span_index];
-                    const start: usize = sp.start;
-                    const end: usize = start + sp.len;
-                    if (end > buf.len) continue; // defensive
-
-                    const name = buf[start..end];
+                while (k < proj_count) : (k += 1) {
+                    const name = proj_tags[k]; // slice into FileImage.buf
+                    if (name.len == 0) continue;
 
                     const gop = try pm.getOrPut(name);
                     if (!gop.found_existing) {
@@ -83,6 +79,11 @@ fn buildProjectsIndex(
     var it = project_map.iterator();
     var i: usize = 0;
     while (it.next()) |e| {
+
+        const name = e.key_ptr.*;
+        const agg = e.value_ptr.*;
+        std.debug.print("project[{d}] = '{s}'  todo={d} done={d}\n",
+            .{ i, name, agg.count_todo, agg.count_done });
         entries[i] = .{
             .name = e.key_ptr.*,          // slice into FileImage.buf
             .count_todo = e.value_ptr.count_todo,
@@ -90,6 +91,8 @@ fn buildProjectsIndex(
         };
         i += 1;
     }
+
+
 
     return entries;
 }
@@ -135,6 +138,15 @@ pub const TaskIndex = struct {
 
 
         const projects = try buildProjectsIndex(allocator, &todo_img, &done_img);
+
+        // DEBUG: verify projects just before TaskIndex is constructed
+        std.debug.print("TaskIndex.load: projects from indexer:\n", .{});
+        for (projects, 0..) |p, idx| {
+            std.debug.print(
+                "  [{d}] name='{s}'  todo={d} done={d}\n",
+                .{ idx, p.name, p.count_todo, p.count_done },
+            );
+        }
 
         return TaskIndex{
             .todo_img = todo_img,

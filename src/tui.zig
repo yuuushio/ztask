@@ -2467,18 +2467,15 @@ fn drawWrappedText(
         var col: usize = col_offset;
         var j: usize = seg_start;
         while (j < line_end and col < win.width) : (j += 1) {
-            const g = text[j .. j + 1];
+            const b = text[j];
+            const g = graphemeFromByte(b);
+
             const cell: Cell = .{
                 .char = .{ .grapheme = g, .width = 1 },
                 .style = style,
             };
             _ = win.writeCell(@intCast(col), row, cell);
             col += 1;
-        }
-
-        // Skip leading spaces at the start of the next row.
-        while (i < len and isSpaceByte(text[i])) {
-            i += 1;
         }
     }
 }
@@ -2914,6 +2911,7 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex) void {
                 selected_style
             else
                 base_style;
+
 
         // One visual row per project for now; simple and predictable.
         drawWrappedText(

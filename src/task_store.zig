@@ -200,7 +200,7 @@ pub fn loadFile(allocator: mem.Allocator, file: fs.File) !FileImage {
 
     // At this point tasks[0..task_index] have text / meta, but proj/ctx fields
     // are still zeroed. Now build the spans table by scanning text once.
-    var spans_list = std.ArrayList(Span){};
+    var spans_list = std.ArrayListUnmanaged(Span){};
     errdefer spans_list.deinit(allocator);
 
     const buf_base: usize = @intFromPtr(buf.ptr);
