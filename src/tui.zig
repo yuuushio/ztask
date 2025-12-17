@@ -781,6 +781,16 @@ pub fn run(
                             } else if (!(try handleListFocusKey(key, ui, ctx.index, allocator))) {
 
                                 handleNavigation(&vx, ctx.index, ui, key);
+                            } else if (!(try handleListFocusKey(key, ui, ctx.index, allocator))) {
+                                if (g_projects_focus) {
+                                    // projects pane has focus; suppress task actions/navigation
+                                } else if (key.matches('@', .{})) {
+                                    try toggleTodoOngoing(ctx, allocator, ui);
+                                } else if (key.matches('X', .{})) {
+                                    try toggleDoneTodo(ctx, allocator, ui);
+                                } else {
+                                    handleNavigation(&vx, ctx.index, ui, key);
+                                }
                             }
                         }
                     },
@@ -980,7 +990,7 @@ fn drawHeader(win: vaxis.Window) void {
 
     const style: vaxis.Style = .{
         .bold = true,
-        .fg = .{ .rgb = .{ 200, 200, 255 } },
+        .fg = .{ .index = 7 },
     };
 
     var col = start_col;
@@ -1019,11 +1029,11 @@ fn drawCounts(win: vaxis.Window, index: *const TaskIndex, ui: *const UiState) vo
     }
 
     const style_inactive: vaxis.Style = .{
-        .fg = .{ .rgb = .{ 180, 180, 180 } },
+        .fg = .{ .index = 7 },
     };
     const style_active: vaxis.Style = .{
         .bold = true,
-        .fg = .{ .rgb = .{ 230, 230, 255 } },
+        .fg = .{ .index = 11 },
     };
 
     // Find the double-space delimiter between TODO and DONE segments.
@@ -3002,7 +3012,7 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus: ListKind)
     };
     const selected_style: vaxis.Style = .{
         .bold = true,
-        .fg = .{ .index = 14 },
+        .fg = .{ .index = 4 },
     };
 
     // separator
@@ -3198,7 +3208,7 @@ fn drawTodoList(
     const base_style: vaxis.Style = .{};
     const sel_style: vaxis.Style = .{
         .bold = true,
-        .fg = .{ .rgb = .{ 220, 220, 255 } },
+        .fg = .{ .index = 7 },
     };
 
     var row: usize = LIST_START_ROW;
