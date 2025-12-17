@@ -2978,7 +2978,7 @@ fn computeProjectsPaneWidth(term_width: usize) usize {
 }
 
 
-fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus:ListKind) void {
+fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus: ListKind) void {
     const term_width: usize = @intCast(win.width);
     const term_height: usize = @intCast(win.height);
     if (term_height == 0 or term_width == 0) return;
@@ -3000,71 +3000,78 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus:ListKind) 
         .fg = .{ .rgb = .{ 220, 220, 255 } },
     };
 
-    // Vertical separator at the right edge of the pane.
+    // separator
     var row: usize = 0;
     while (row < term_height) : (row += 1) {
-        const cell: Cell = .{
+        _ = win.writeCell(@intCast(right_col), @intCast(row), .{
             .char = .{ .grapheme = "│", .width = 1 },
             .style = base_style,
-        };
-        _ = win.writeCell(@intCast(right_col), @intCast(row), cell);
+        });
     }
 
-    // Header "Projects" centered within the pane, not across the whole screen.
+    // header
     const header = "Projects";
-    const header_len: usize = header.len;
-
     const usable_cols = if (right_col > 0) right_col else 0;
+
     var start_col: usize = 0;
-    if (usable_cols > header_len) {
-        start_col = (usable_cols - header_len) / 2;
-    }
+    if (usable_cols > header.len) start_col = (usable_cols - header.len) / 2;
 
     const header_row: usize = if (term_height > 2) 2 else 0;
     var col: usize = start_col;
     var i: usize = 0;
-    while (i < header_len and col < usable_cols) : (i += 1) {
-        const g = header[i .. i + 1];
-        const cell: Cell = .{
-            .char = .{ .grapheme = g, .width = 1 },
+    while (i < header.len and col < usable_cols) : (i += 1) {
+        _ = win.writeCell(@intCast(col), @intCast(header_row), .{
+            .char = .{ .grapheme = header[i .. i + 1], .width = 1 },
             .style = header_style,
-        };
-        _ = win.writeCell(@intCast(col), @intCast(header_row), cell);
+        });
         col += 1;
     }
 
     if (projects.len == 0) return;
 
+    // use per-tab selection (todo vs done), not g_projects_selected
+    const sel_ptr = selectedProjectPtr(focus);
+    if (sel_ptr.* >= projects.len) sel_ptr.* = projects.len - 1;
+    const sel_idx = sel_ptr.*;
 
-    // List of "+project" entries, wrapped within the pane.
     var proj_row: usize = header_row + 2;
     if (proj_row >= term_height) return;
 
-    const max_text_width = if (right_col > 1) right_col - 1 else 0;
+    // we draw in columns [0..right_col-1]
+    const max_text_width = right_col;
     if (max_text_width == 0) return;
-
-
-    const sel_ptr = selectedProjectPtr(focus);
-    if (sel_ptr.* >= projects.len) sel_ptr.* = projects.len - 1;
 
     var idx: usize = 0;
     while (idx < projects.len and proj_row < term_height) : (idx += 1) {
         const entry = projects[idx];
+        const is_sel = (idx == sel_idx);
+
+        const style =
+            if (is_sel and g_projects_focus)
+                selected_style
+            else
+                base_style;
 
         var line_buf: [64]u8 = undefined;
         var pos: usize = 0;
 
+        // indicator column: always show for selected project, regardless of focus
+        line_buf[pos] = if (is_sel) '>' else ' ';
+        pos += 1;
+        line_buf[pos] = ' ';
+        pos += 1;
+
+        // entry text
         if (idx == 0) {
-            // "all" entry, no '+'
             const lit = "all";
-            const copy_len = @min(lit.len, line_buf.len);
-            @memcpy(line_buf[0..copy_len], lit[0..copy_len]);
-            pos = copy_len;
+            const copy_len = @min(lit.len, line_buf.len - pos);
+            @memcpy(line_buf[pos .. pos + copy_len], lit[0..copy_len]);
+            pos += copy_len;
         } else {
             line_buf[pos] = '+';
             pos += 1;
 
-            if (entry.name.len != 0) {
+            if (entry.name.len != 0 and pos < line_buf.len) {
                 const copy_len = @min(entry.name.len, line_buf.len - pos);
                 @memcpy(line_buf[pos .. pos + copy_len], entry.name[0..copy_len]);
                 pos += copy_len;
@@ -3073,13 +3080,16 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus:ListKind) 
 
         const line = line_buf[0..pos];
 
-        const style =
-            if (g_projects_focus and idx == sel_ptr.*)
-                selected_style
-            else
-                base_style;
+        drawWrappedText(
+            win,
+            proj_row,
+            0,              // start at col 0 so the '>' is truly “next to”
+            1,              // one row per project
+            max_text_width, // stay left of the separator
+            line,
+            style,
+        );
 
-        drawWrappedText(win, proj_row, 1, 1, max_text_width, line, style);
         proj_row += 1;
     }
 }
