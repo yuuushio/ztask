@@ -778,18 +778,18 @@ pub fn run(
                                 list_cmd_active = true;
                                 list_cmd_new = false;
                                 list_cmd_done = false;
-                            } else if (!(try handleListFocusKey(key, ui, ctx.index, allocator))) {
-
-                                handleNavigation(&vx, ctx.index, ui, key);
-                            } else if (!(try handleListFocusKey(key, ui, ctx.index, allocator))) {
-                                if (g_projects_focus) {
-                                    // projects pane has focus; suppress task actions/navigation
-                                } else if (key.matches('@', .{})) {
-                                    try toggleTodoOngoing(ctx, allocator, ui);
-                                } else if (key.matches('X', .{})) {
-                                    try toggleDoneTodo(ctx, allocator, ui);
-                                } else {
-                                    handleNavigation(&vx, ctx.index, ui, key);
+                            } else {
+                                const handled_focus = try handleListFocusKey(key, ui, ctx.index, allocator);
+                                if (!handled_focus) {
+                                    if (g_projects_focus) {
+                                        // sidebar focus: ignore task actions + list navigation
+                                    } else if (key.matches('@', .{})) {
+                                        try toggleTodoOngoing(ctx, allocator, ui);
+                                    } else if (key.matches('X', .{})) {
+                                        try toggleDoneTodo(ctx, allocator, ui);
+                                    } else {
+                                        handleNavigation(&vx, ctx.index, ui, key);
+                                    }
                                 }
                             }
                         }
@@ -823,6 +823,148 @@ pub fn run(
         }
 
         try vx.render(tty.writer());
+    }
+}
+
+
+fn selectedOriginalIndexForActiveView(ui: *UiState) ?usize {
+    const focus = ui.focus;
+    const visible = visibleIndicesForFocus(focus);
+    if (visible.len == 0) return null;
+
+    var view = ui.activeView();
+    if (view.selected_index >= visible.len) view.selected_index = visible.len - 1;
+    return visible[view.selected_index];
+}
+
+fn clampActiveViewToVisible(ui: *UiState) void {
+    const focus = ui.focus;
+    var view = ui.activeView();
+    const vlen = visibleLenForFocus(focus);
+    if (vlen == 0) {
+        view.selected_index = 0;
+        view.scroll_offset = 0;
+        view.last_move = 0;
+        return;
+    }
+    if (view.selected_index >= vlen) view.selected_index = vlen - 1;
+    if (view.scroll_offset >= vlen) view.scroll_offset = 0;
+}
+
+fn toggleTodoOngoing(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    ui: *UiState,
+) !void {
+    if (ui.focus != .todo) return;
+
+    const todos = ctx.index.todoSlice();
+    if (todos.len == 0) return;
+
+    const orig_idx = selectedOriginalIndexForActiveView(ui) orelse return;
+    if (orig_idx >= todos.len) return;
+
+    const old = todos[orig_idx];
+    var updated = old;
+    updated.status = if (old.status == .ongoing) .todo else .ongoing;
+    updated.repeat_next_ms = 0;
+
+    var todo_file = ctx.todo_file.*;
+    try store.rewriteJsonFileReplacingIndex(
+        allocator,
+        &todo_file,
+        todos,
+        orig_idx,
+        updated,
+    );
+
+    try ctx.index.reload(allocator, todo_file, ctx.done_file.*);
+    try rebuildVisibleAll(allocator, ctx.index);
+    clampActiveViewToVisible(ui);
+}
+
+fn toggleDoneTodo(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    ui: *UiState,
+) !void {
+    const sel_visible: usize = ui.activeView().selected_index;
+
+    if (ui.focus == .todo) {
+        const todos = ctx.index.todoSlice();
+        if (todos.len == 0) return;
+
+        const orig_idx = selectedOriginalIndexForActiveView(ui) orelse return;
+        if (orig_idx >= todos.len) return;
+
+        const original = todos[orig_idx];
+        var moved = original;
+        moved.status = .done;
+
+        moved.repeat_next_ms = 0;
+        if (moved.repeat.len != 0) {
+            const now_ms = std.time.milliTimestamp();
+            moved.repeat_next_ms = computeRepeatNextMs(moved.repeat, now_ms);
+        }
+
+        var done_file = ctx.done_file.*;
+        try store.appendJsonTaskLine(allocator, &done_file, moved);
+
+        var todo_file = ctx.todo_file.*;
+        try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, todos, orig_idx);
+
+        try ctx.index.reload(allocator, todo_file, done_file);
+        try rebuildVisibleAll(allocator, ctx.index);
+
+        ui.focus = .todo;
+        var view = ui.activeView();
+        const vlen = visibleLenForFocus(.todo);
+        if (vlen == 0) {
+            view.selected_index = 0;
+            view.scroll_offset = 0;
+        } else if (sel_visible >= vlen) {
+            view.selected_index = vlen - 1;
+        } else {
+            view.selected_index = sel_visible;
+        }
+        view.last_move = -1;
+        return;
+    }
+
+    if (ui.focus == .done) {
+        const dones = ctx.index.doneSlice();
+        if (dones.len == 0) return;
+
+        const orig_idx = selectedOriginalIndexForActiveView(ui) orelse return;
+        if (orig_idx >= dones.len) return;
+
+        const original = dones[orig_idx];
+        var moved = original;
+        moved.status = .todo;
+        moved.repeat_next_ms = 0;
+
+        var todo_file = ctx.todo_file.*;
+        try store.appendJsonTaskLine(allocator, &todo_file, moved);
+
+        var done_file = ctx.done_file.*;
+        try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, orig_idx);
+
+        try ctx.index.reload(allocator, todo_file, done_file);
+        try rebuildVisibleAll(allocator, ctx.index);
+
+        ui.focus = .done;
+        var view = ui.activeView();
+        const vlen = visibleLenForFocus(.done);
+        if (vlen == 0) {
+            view.selected_index = 0;
+            view.scroll_offset = 0;
+        } else if (sel_visible >= vlen) {
+            view.selected_index = vlen - 1;
+        } else {
+            view.selected_index = sel_visible;
+        }
+        view.last_move = -1;
+        return;
     }
 }
 
