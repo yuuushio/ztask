@@ -35,7 +35,7 @@ const PROJECT_PANEL_MIN_LIST_WIDTH: usize = 20;
 const PROJECT_PANEL_MIN_WIDTH: usize = 16;
 const PROJECT_PANEL_MAX_WIDTH: usize = 32;
 
-const PROJECT_PANE_MAX_WIDTH: usize = 24;
+const PROJECT_PANE_MAX_WIDTH: usize = 20;
 const PROJECT_PANE_MIN_WIDTH: usize = 14;
 
 // Sidebar UI state; kept local to tui so UiState does not grow yet.
@@ -2991,21 +2991,26 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus: ListKind)
     const projects = projectsForFocus(index, focus);
 
     const base_style: vaxis.Style = .{};
+
+    const separator_style: vaxis.Style = .{
+
+        .fg = .{ .index = 8 },
+    };
     const header_style: vaxis.Style = .{
         .bold = true,
-        .fg = .{ .rgb = .{ 200, 200, 255 } },
+        .fg = .{ .index = 4},
     };
     const selected_style: vaxis.Style = .{
         .bold = true,
-        .fg = .{ .rgb = .{ 220, 220, 255 } },
+        .fg = .{ .index = 14 },
     };
 
     // separator
-    var row: usize = 0;
-    while (row < term_height) : (row += 1) {
+    var row: usize = 2;
+    while (row < term_height-2) : (row += 1) {
         _ = win.writeCell(@intCast(right_col), @intCast(row), .{
             .char = .{ .grapheme = "│", .width = 1 },
-            .style = base_style,
+            .style = separator_style,
         });
     }
 
@@ -3041,53 +3046,77 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus: ListKind)
     const max_text_width = right_col;
     if (max_text_width == 0) return;
 
+    // two-column gutter: [indicator][space], then text begins at col 2
+    const text_col: usize = 2;
+    if (right_col <= text_col) return;
+
+    // max columns available for the ASCII label, staying left of separator
+    const max_label_cols: usize = right_col - text_col;
+    if (max_label_cols == 0) return;
+
     var idx: usize = 0;
     while (idx < projects.len and proj_row < term_height) : (idx += 1) {
         const entry = projects[idx];
         const is_sel = (idx == sel_idx);
 
-        const style =
-            if (is_sel and g_projects_focus)
-                selected_style
+        const selected_focused_style: vaxis.Style = selected_style;
+        const selected_unfocused_style: vaxis.Style = .{
+            .fg = selected_style.fg, // keep your color index
+            .bold = false,           // your requested distinction
+        };
+
+        const row_style: vaxis.Style =
+            if (is_sel)
+                (if (g_projects_focus) selected_focused_style else selected_unfocused_style)
             else
                 base_style;
 
-        var line_buf: [64]u8 = undefined;
+        const row_u16: u16 = @intCast(proj_row);
+
+        // gutter cell 0: indicator glyph
+        _ = win.writeCell(0, row_u16, .{
+            // pick one:
+            // .char = .{ .grapheme = if (is_sel) ">" else " ", .width = 1 },
+            .char = .{ .grapheme = if (is_sel) "❚" else " ", .width = 1 },
+            .style = row_style,
+        });
+
+        // gutter cell 1: pad space, always present
+        _ = win.writeCell(1, row_u16, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = base_style,
+        });
+
+        // build ASCII label (drawWrappedText cannot safely render UTF-8)
+        var label_buf: [64]u8 = undefined;
         var pos: usize = 0;
 
-        // indicator column: always show for selected project, regardless of focus
-        line_buf[pos] = if (is_sel) '>' else ' ';
-        pos += 1;
-        line_buf[pos] = ' ';
-        pos += 1;
-
-        // entry text
         if (idx == 0) {
             const lit = "all";
-            const copy_len = @min(lit.len, line_buf.len - pos);
-            @memcpy(line_buf[pos .. pos + copy_len], lit[0..copy_len]);
-            pos += copy_len;
+            const n = @min(lit.len, label_buf.len);
+            @memcpy(label_buf[0..n], lit[0..n]);
+            pos = n;
         } else {
-            line_buf[pos] = '+';
+            label_buf[pos] = '+';
             pos += 1;
 
-            if (entry.name.len != 0 and pos < line_buf.len) {
-                const copy_len = @min(entry.name.len, line_buf.len - pos);
-                @memcpy(line_buf[pos .. pos + copy_len], entry.name[0..copy_len]);
-                pos += copy_len;
+            const n = @min(entry.name.len, label_buf.len - pos);
+            if (n != 0) {
+                @memcpy(label_buf[pos .. pos + n], entry.name[0..n]);
+                pos += n;
             }
         }
 
-        const line = line_buf[0..pos];
+        const label = label_buf[0..pos];
 
         drawWrappedText(
             win,
             proj_row,
-            0,              // start at col 0 so the '>' is truly “next to”
-            1,              // one row per project
-            max_text_width, // stay left of the separator
-            line,
-            style,
+            text_col,        // text always starts after the gutter
+            1,               // one row per project
+            max_label_cols,  // stay left of the separator
+            label,
+            row_style,
         );
 
         proj_row += 1;
