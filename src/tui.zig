@@ -898,6 +898,10 @@ fn toggleDoneTodo(
         if (orig_idx >= todos.len) return;
 
         const original = todos[orig_idx];
+
+        const orig_id = original.id;
+        const orig_created = original.created_ms;
+
         var moved = original;
         moved.status = .done;
 
@@ -906,6 +910,9 @@ fn toggleDoneTodo(
             const now_ms = std.time.milliTimestamp();
             moved.repeat_next_ms = computeRepeatNextMs(moved.repeat, now_ms);
         }
+
+        moved.id = orig_id;
+        moved.created_ms = orig_created;
 
         var done_file = ctx.done_file.*;
         try store.appendJsonTaskLine(allocator, &done_file, moved);
@@ -939,9 +946,17 @@ fn toggleDoneTodo(
         if (orig_idx >= dones.len) return;
 
         const original = dones[orig_idx];
+        const orig_id = original.id;
+        const orig_created = original.created_ms;
+
+
         var moved = original;
+
         moved.status = .todo;
         moved.repeat_next_ms = 0;
+
+        moved.id = orig_id;
+        moved.created_ms = orig_created;
 
         var todo_file = ctx.todo_file.*;
         try store.appendJsonTaskLine(allocator, &todo_file, moved);
@@ -2161,6 +2176,9 @@ fn markDone(
     const remove_index = visible[sel_visible]; // ORIGINAL index into todos
     const original = todos[remove_index];
 
+    const orig_id = original.id;
+    const orig_created = original.created_ms;
+
     var moved = original;
     moved.status = .done;
 
@@ -2169,6 +2187,10 @@ fn markDone(
         const now_ms = std.time.milliTimestamp();
         moved.repeat_next_ms = computeRepeatNextMs(moved.repeat, now_ms);
     }
+
+    // Identity invariants: never change on status moves.
+    moved.id = orig_id;
+    moved.created_ms = orig_created;
 
     var done_file = ctx.done_file.*;
     try store.appendJsonTaskLine(allocator, &done_file, moved);
@@ -2292,9 +2314,16 @@ fn processRepeats(
         var todo_file = ctx.todo_file.*;
         var done_file = ctx.done_file.*;
 
+        const orig_id = move_task.id;
+        const orig_created = move_task.created_ms;
+
         var resurrect = move_task;
+
         resurrect.status = .todo;
         resurrect.repeat_next_ms = 0; // timer only re-armed on next completion
+        //
+        resurrect.id = orig_id;
+        resurrect.created_ms = orig_created;
 
         try store.appendJsonTaskLine(allocator, &todo_file, resurrect);
         try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, move_index);
