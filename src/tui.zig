@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const store = @import("task_store.zig");
+const math = std.math;
 
 const dt = @import("due_datetime.zig");
 
@@ -28,6 +29,7 @@ const ListView = ui_mod.ListView;
 
 const LIST_START_ROW: usize = 4;
 const STATUS_WIDTH: usize = 4;
+const CREATED_COLS: usize = 13;
 const META_SUFFIX_BUF_LEN: usize = 48;
 
 const PROJECT_PANEL_MIN_TERM_WIDTH: usize = 40;
@@ -79,6 +81,59 @@ const ascii_graphemes = blk: {
 
 inline fn graphemeFromByte(b: u8) []const u8 {
     return ascii_graphemes[b][0..1];
+}
+
+
+fn civilFromDays(days_since_epoch: i64) struct { y: i32, m: u8, d: u8 } {
+    // Howard Hinnant: civil_from_days; days_since_epoch is relative to 1970-01-01.
+    const z: i64 = days_since_epoch + 719468;
+    const era: i64 = if (z >= 0) @divTrunc(z, 146097) else @divTrunc(z - 146096, 146097);
+    const doe: i64 = z - era * 146097; // [0, 146096]
+    const yoe: i64 = @divTrunc(doe - @divTrunc(doe, 1460) + @divTrunc(doe, 36524) - @divTrunc(doe, 146096), 365);
+    var y: i64 = yoe + era * 400;
+    const doy: i64 = doe - (365 * yoe + @divTrunc(yoe, 4) - @divTrunc(yoe, 100));
+    const mp: i64 = @divTrunc(5 * doy + 2, 153);
+    const d: i64 = doy - @divTrunc(153 * mp + 2, 5) + 1;
+    const m_raw: i64 = mp + (if (mp < 10) @as(i64, 3) else @as(i64, -9));
+    y += if (m_raw <= 2) @as(i64, 1) else @as(i64, 0);
+    return .{
+        .y = @intCast(y),
+        .m = @intCast(m_raw),
+        .d = @intCast(d),
+    };
+}
+
+fn isoDateFromEpochMs(ms: i64, out: *[10]u8) bool {
+    if (ms <= 0) return false;
+    const secs: i64 = @divTrunc(ms, 1000);
+    const days: i64 = @divTrunc(secs, 86400);
+    const civ = civilFromDays(days);
+
+    // Clamp year to 0000..9999 for fixed-width rendering.
+    var y: i32 = civ.y;
+    if (y < 0) y = 0;
+    if (y > 9999) y = 9999;
+    const yy: u32 = @intCast(y);
+
+    out[0] = '0' + @as(u8, @intCast((yy / 1000) % 10));
+    out[1] = '0' + @as(u8, @intCast((yy / 100) % 10));
+    out[2] = '0' + @as(u8, @intCast((yy / 10) % 10));
+    out[3] = '0' + @as(u8, @intCast(yy % 10));
+    out[4] = '-';
+
+    const mm: u8 = civ.m;
+    out[5] = '0' + (mm / 10);
+    out[6] = '0' + (mm % 10);
+    out[7] = '-';
+
+    const dd: u8 = civ.d;
+    out[8] = '0' + (dd / 10);
+    out[9] = '0' + (dd % 10);
+    return true;
+}
+
+inline fn createdPrefixCols(created_ms: i64) usize {
+    return if (created_ms != 0) CREATED_COLS else 0;
 }
 
 fn projectsForFocus(index: *const TaskIndex, focus: ListKind) []const ProjectEntry {
@@ -2999,6 +3054,15 @@ fn prefixWidthForPrio(prio: u8) usize {
     return STATUS_WIDTH + len + 1;
 }
 
+fn prefixWidthForTask(task: Task) usize {
+    var w: usize = STATUS_WIDTH;
+    w += createdPrefixCols(task.created_ms);
+    if (task.priority != 0) {
+        w += priorityLen(task.priority) + 1; // "P{digits} "
+    }
+    return w;
+}
+
 const TaskLayout = struct {
     prefix: usize,
     rows: usize,
@@ -3010,7 +3074,7 @@ fn computeLayout(task: Task, content_width: usize) TaskLayout {
         return .{ .prefix = 0, .rows = 0 };
     }
 
-    const prefix = prefixWidthForPrio(task.priority);
+    const prefix = prefixWidthForTask(task);
 
     if (content_width <= prefix) {
         // Only enough room for status/prio on the first row.
@@ -3438,6 +3502,44 @@ fn drawTodoList(
             });
             col_status += 1;
         }
+
+    // created: "[YYYY-MM-DD] "
+    if (task.created_ms != 0 and col_status < win.width) {
+        var ymd: [10]u8 = undefined;
+        if (isoDateFromEpochMs(task.created_ms, &ymd)) {
+            // '['
+            _ = win.writeCell(col_status, row_u16, .{
+                .char = .{ .grapheme = graphemeFromByte('['), .width = 1 },
+                .style = style,
+            });
+            col_status += 1;
+
+            var di: usize = 0;
+            while (di < ymd.len and col_status < win.width) : (di += 1) {
+                _ = win.writeCell(col_status, row_u16, .{
+                    .char = .{ .grapheme = graphemeFromByte(ymd[di]), .width = 1 },
+                    .style = style,
+                });
+                col_status += 1;
+            }
+
+            if (col_status < win.width) {
+                _ = win.writeCell(col_status, row_u16, .{
+                    .char = .{ .grapheme = graphemeFromByte(']'), .width = 1 },
+                    .style = style,
+                });
+                col_status += 1;
+            }
+
+            if (col_status < win.width) {
+                _ = win.writeCell(col_status, row_u16, .{
+                    .char = .{ .grapheme = space_slice, .width = 1 },
+                    .style = style,
+                });
+                col_status += 1;
+            }
+        }
+    }
 
         var text_start_col: u16 = col_status;
         if (task.priority != 0 and col_status < win.width) {
