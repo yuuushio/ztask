@@ -5,6 +5,8 @@ const math = std.math;
 
 const dt = @import("due_datetime.zig");
 
+const due_today_mod = @import("due_today.zig");
+
 const Cell = vaxis.Cell;
 
 const fs = std.fs;
@@ -18,6 +20,7 @@ const Task = task_mod.Task;
 
 
 const ProjectEntry = task_mod.ProjectEntry;
+
 
 
 
@@ -50,6 +53,8 @@ var g_projects_selected_done: usize = 0;
 // visible task indices (into the underlying todo/done slices)
 var g_visible_todo = std.ArrayListUnmanaged(usize){};
 var g_visible_done = std.ArrayListUnmanaged(usize){};
+
+var g_due_today: due_today_mod.DueToday = .{};
 
 /// Event type for the libvaxis low-level loop.
 const Event = union(enum) {
@@ -185,6 +190,8 @@ fn taskHasProject(img: *const store.FileImage, task: store.Task, project: []cons
     return false;
 }
 
+
+
 fn rebuildVisibleFor(
     allocator: std.mem.Allocator,
     index: *const TaskIndex,
@@ -221,6 +228,7 @@ fn rebuildVisibleFor(
 fn rebuildVisibleAll(allocator: std.mem.Allocator, index: *const TaskIndex) !void {
     try rebuildVisibleFor(allocator, index, .todo);
     try rebuildVisibleFor(allocator, index, .done);
+    try g_due_today.refresh(allocator, index);
 }
 
 fn visibleLenForFocus(focus: ListKind) usize {
@@ -766,9 +774,15 @@ pub fn run(
 
     defer g_visible_todo.deinit(allocator);
     defer g_visible_done.deinit(allocator);
+    defer g_due_today.deinit(allocator);
 
     var view: AppView = .list;
     var editor = EditorState.init();
+    var due_view: ListView = .{
+        .selected_index = 0,
+        .scroll_offset = 0,
+        .last_move = 0,
+    };
 
     var list_cmd_active = false;
     var list_cmd_new = false;
@@ -802,6 +816,7 @@ pub fn run(
     try processRepeats(ctx, allocator);
 
     try rebuildVisibleAll(allocator, ctx.index);
+    try g_due_today.refresh(allocator, ctx.index);
 
     var running = true;
     while (running) {
@@ -827,30 +842,65 @@ pub fn run(
                                 allocator,
                                 ui,
                             );
+                            break;
+                        }
+
+                        if (key.matches(':', .{})) {
+                            // Start list-view ":" command-line
+                            list_cmd_active = true;
+                            list_cmd_new = false;
+                            list_cmd_done = false;
+                            list_cmd_edit = false;
+                            break;
+                        }
+
+                        // Fullscreen due-today pane toggle (disabled while sidebar is focused).
+                        if (key.matches('d', .{}) and !g_projects_focus) {
+                            g_projects_focus = false;
+                            try g_due_today.refresh(allocator, ctx.index);
+                            view = .due_today;
+                            break;
+                        }
+
+                        // Focus keys (projects pane, Tab, H/L) have priority.
+                        if (try handleListFocusKey(key, ui, ctx.index, allocator)) {
+                            break;
+                        }
+
+                        if (g_projects_focus) {
+                            // Sidebar is focused; suppress task actions/navigation.
+                            break;
+                        }
+
+                        if (key.matches('@', .{})) {
+                            try toggleTodoOngoing(ctx, allocator, ui);
+                        } else if (key.matches('X', .{})) {
+                            try toggleDoneTodo(ctx, allocator, ui);
                         } else {
-                            if (key.matches(':', .{})) {
-                                // Start list-view ":" command-line
-                                list_cmd_active = true;
-                                list_cmd_new = false;
-                                list_cmd_done = false;
-                            } else {
-                                const handled_focus = try handleListFocusKey(key, ui, ctx.index, allocator);
-                                if (!handled_focus) {
-                                    if (g_projects_focus) {
-                                        // sidebar focus: ignore task actions + list navigation
-                                    } else if (key.matches('@', .{})) {
-                                        try toggleTodoOngoing(ctx, allocator, ui);
-                                    } else if (key.matches('X', .{})) {
-                                        try toggleDoneTodo(ctx, allocator, ui);
-                                    } else {
-                                        handleNavigation(&vx, ctx.index, ui, key);
-                                    }
-                                }
-                            }
+                            handleNavigation(&vx, ctx.index, ui, key);
+                        }
+                    },
+                    .due_today => {
+                        // Toggle back to the main list.
+                        if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
+                            view = .list;
+                            break;
+                        }
+
+                        // Keep the due list fresh across midnight (cheap check).
+                        try g_due_today.maybeRefresh(allocator, ctx.index);
+
+                        const vlen = g_due_today.visible.items.len;
+                        if (vlen == 0) break;
+
+                        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+                            moveListViewSelection(&due_view, vlen, 1);
+                        } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+                            moveListViewSelection(&due_view, vlen, -1);
                         }
                     },
                     .editor => {
-                        try handleEditorKey(key, &view, &editor, ctx, allocator,ui);
+                        try handleEditorKey(key, &view, &editor, ctx, allocator, ui);
                     },
                 }
             },
@@ -860,6 +910,7 @@ pub fn run(
         }
 
         try processRepeats(ctx, allocator);
+        try g_due_today.maybeRefresh(allocator, ctx.index);
 
         const win = vx.window();
         clearAll(win);
@@ -872,6 +923,9 @@ pub fn run(
                 drawTodoList(win, ctx.index, ui, list_cmd_active);
                 drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done, list_cmd_edit);
             },
+            .due_today => {
+                drawDueTodayView(win,ctx.index,&due_view);
+            },
             .editor => {
                 drawEditorView(win, &editor);
             },
@@ -879,6 +933,155 @@ pub fn run(
 
         try vx.render(tty.writer());
     }
+}
+
+fn drawDueTodayView(win: vaxis.Window, index: *const TaskIndex, due_view: *ListView) void {
+    const term_w: usize = @intCast(win.width);
+    const term_h: usize = @intCast(win.height);
+    if (term_w == 0 or term_h == 0) return;
+
+    const day_buf: [10]u8 = undefined;
+    _ = day_buf;
+    const today = g_due_today.todayIso();
+
+    var hdr_buf: [32]u8 = undefined;
+    const hdr = std.fmt.bufPrint(&hdr_buf, "DUE TODAY {s}", .{today}) catch "DUE TODAY";
+    const hdr_style: vaxis.Style = .{ .bold = true };
+    drawCenteredText(win, 0, hdr, hdr_style);
+
+    const hint_style: vaxis.Style = .{ .fg = .{ .index = 8 } };
+    if (term_h >= 2) {
+        drawCenteredText(win, @intCast(term_h - 1), "d: back   j/k: move", hint_style);
+    }
+
+    drawDueTodayList(win, index, due_view);
+}
+
+fn drawDueTodayList(win: vaxis.Window, index: *const TaskIndex, due_view: *ListView) void {
+    const visible = g_due_today.visible.items;
+    const todos = index.todoSlice();
+
+    const term_h: usize = @intCast(win.height);
+    const term_w: usize = @intCast(win.width);
+    if (term_h == 0 or term_w == 0) return;
+
+    const list_start: usize = 2;
+    const reserved_rows: usize = if (term_h > 1) 1 else 0;
+    if (term_h <= list_start + reserved_rows) return;
+
+    const viewport_h: usize = term_h - list_start - reserved_rows;
+    if (viewport_h == 0) return;
+
+    if (visible.len == 0) {
+        const style: vaxis.Style = .{ .fg = .{ .index = 8 } };
+        drawCenteredText(win, @intCast(list_start), "(none due today)", style);
+        due_view.selected_index = 0;
+        due_view.scroll_offset = 0;
+        due_view.last_move = 0;
+        return;
+    }
+
+    if (due_view.selected_index >= visible.len) due_view.selected_index = visible.len - 1;
+    if (due_view.scroll_offset >= visible.len) due_view.scroll_offset = 0;
+
+    // Classic gutter: "> " then status/prio/text.
+    const arrow_col: u16 = 0;
+    const pad_col: u16 = 1;
+    const content_start_col: u16 = 2;
+
+    if (@as(usize, content_start_col) >= term_w) return;
+    const content_w: usize = term_w - @as(usize, content_start_col);
+    if (content_w <= STATUS_WIDTH) return;
+
+    const dir = due_view.last_move;
+    if (!isSelectionFullyVisible(due_view, todos, visible, viewport_h, content_w)) {
+        recomputeScrollOffsetForSelection(due_view, todos, visible, viewport_h, content_w, dir);
+    }
+
+    const indicator_slice = ">"[0..1];
+    const space_slice = " "[0..1];
+
+    const base_style: vaxis.Style = .{};
+    const sel_style: vaxis.Style = .{ .bold = true, .fg = .{ .index = 7 } };
+
+    var row: usize = list_start;
+    var remaining: usize = viewport_h;
+    var vi: usize = due_view.scroll_offset;
+
+    while (vi < visible.len and remaining > 0 and row < term_h) : (vi += 1) {
+        const t = todos[visible[vi]];
+        const selected = (due_view.selected_index == vi);
+        const style = if (selected) sel_style else base_style;
+
+        var layout = computeLayout(t, content_w);
+        if (layout.rows == 0) layout.rows = 1;
+        if (layout.rows > remaining) break;
+
+        const row_u16: u16 = @intCast(row);
+
+        _ = win.writeCell(arrow_col, row_u16, .{
+            .char = .{ .grapheme = if (selected) indicator_slice else space_slice, .width = 1 },
+            .style = style,
+        });
+        _ = win.writeCell(pad_col, row_u16, .{
+            .char = .{ .grapheme = space_slice, .width = 1 },
+            .style = style,
+        });
+
+        const status_text: []const u8 = switch (t.status) {
+            .todo => "[ ]",
+            .ongoing => "[@]",
+            .done => "[x]",
+        };
+
+        var col_status: u16 = content_start_col;
+        var s_i: usize = 0;
+        while (s_i < status_text.len and col_status < win.width) : (s_i += 1) {
+            _ = win.writeCell(col_status, row_u16, .{
+                .char = .{ .grapheme = status_text[s_i .. s_i + 1], .width = 1 },
+                .style = style,
+            });
+            col_status += 1;
+        }
+        if (col_status < win.width) {
+            _ = win.writeCell(col_status, row_u16, .{
+                .char = .{ .grapheme = space_slice, .width = 1 },
+                .style = style,
+            });
+            col_status += 1;
+        }
+
+        var text_start_col: u16 = col_status;
+        if (t.priority != 0 and col_status < win.width) {
+            text_start_col = drawPriorityPrefix(win, row_u16, col_status, t.priority, style);
+        }
+
+        if (content_w > layout.prefix) {
+            const text_w: usize = content_w - layout.prefix;
+            drawWrappedTask(win, t, row, @intCast(text_start_col), layout.rows, text_w, style);
+        }
+
+        row += layout.rows;
+        remaining -= layout.rows;
+    }
+}
+
+fn moveListViewSelection(view: *ListView, len: usize, delta: i32) void {
+    if (len == 0) {
+        view.selected_index = 0;
+        view.scroll_offset = 0;
+        view.last_move = 0;
+        return;
+    }
+
+    const cur: i32 = @intCast(view.selected_index);
+    var next = cur + delta;
+    if (next < 0) next = 0;
+    const max: i32 = @intCast(len - 1);
+    if (next > max) next = max;
+
+    view.selected_index = @intCast(next);
+    view.last_move = if (delta < 0) -1 else 1;
 }
 
 
