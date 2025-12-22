@@ -1,4 +1,9 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+const c = @cImport({
+    @cInclude("time.h");
+});
 
 const task_mod = @import("task_index.zig");
 const TaskIndex = task_mod.TaskIndex;
@@ -83,18 +88,24 @@ pub const DueToday = struct {
 
 fn fillTodayLocalIso(out: *[10]u8) bool {
     comptime {
-        if (!std.builtin.link_libc) {
+        if (@hasDecl(builtin, "link_libc") and !builtin.link_libc) {
             @compileError("due_today requires libc for local civil date (localtime_r). Build with libc enabled.");
         }
     }
 
-    var now: std.c.time_t = @intCast(std.time.timestamp());
+    var now: c.time_t = @intCast(std.time.timestamp());
 
-    var tm: std.c.tm = undefined;
-    if (std.c.localtime_r(&now, &tm) == null) return false;
+    var tm: c.struct_tm = undefined;
+
+    // If this fails, you can either return false (your current behavior)
+    // or fall back to UTC via gmtime_r. Returning false is fine because
+    // ensureTodayLocal fails closed.
+    if (c.localtime_r(&now, &tm) == null) {
+        if (c.gmtime_r(&now, &tm) == null) return false;
+    }
 
     const year: i32 = tm.tm_year + 1900;
-    const mon: i32 = tm.tm_mon + 1;
+    const mon:  i32 = tm.tm_mon + 1;
     const mday: i32 = tm.tm_mday;
 
     const s = std.fmt.bufPrint(out.*[0..], "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, mon, mday }) catch return false;
