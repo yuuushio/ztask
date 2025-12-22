@@ -967,18 +967,15 @@ fn drawDueTodayList(win: vaxis.Window, index: *const TaskIndex, due_view: *ListV
     const list_start: usize = 2;
     const reserved_rows: usize = if (term_h > 1) 1 else 0;
 
+
     if (visible.len == 0) {
-        if (term_h > list_start) {
-            const style: vaxis.Style = .{ .fg = .{ .index = 8 } };
-            drawCenteredText(win, @intCast(list_start), "(none due today)", style);
-        }
+        const style: vaxis.Style = .{ .fg = .{ .index = 8 } };
+        const msg_row_usize = @min(list_start + (term_h / 2), term_h - 1);
+        drawCenteredText(win, @intCast(msg_row_usize), "No tasks due today", style);
+
         due_view.selected_index = 0;
         due_view.scroll_offset = 0;
         due_view.last_move = 0;
-
-        const style: vaxis.Style = .{ .fg = .{ .index = 8 } };
-        drawCenteredText(win, @intCast(list_start + (term_h / 2)), "No tasks due today", style);
-
         return;
     }
 
@@ -2240,23 +2237,25 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
 }
 
 fn drawCenteredText(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.Style) void {
+    if (win.height == 0 or win.width == 0) return;
+    if (row >= win.height) return;
+
     const term_width: usize = @intCast(win.width);
-    const len = text.len;
+    const len: usize = text.len;
 
     var start_col: usize = 0;
-    if (term_width > len) {
-        start_col = (term_width - len) / 2;
-    }
+    if (term_width > len) start_col = (term_width - len) / 2;
 
-    var col = start_col;
+    var col: usize = start_col;
     var i: usize = 0;
     while (i < len and col < term_width) : (i += 1) {
-        const g = text[i .. i + 1];
-        const cell: Cell = .{
+        const b: u8 = text[i];
+        const g: []const u8 = if (b < 128) graphemeFromByte(b) else "?"[0..1];
+
+        _ = win.writeCell(@intCast(col), row, .{
             .char = .{ .grapheme = g, .width = 1 },
             .style = style,
-        };
-        _ = win.writeCell(@intCast(col), row, cell);
+        });
         col += 1;
     }
 }
