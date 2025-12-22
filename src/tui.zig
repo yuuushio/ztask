@@ -218,9 +218,6 @@ pub fn run(
                             break;
                         }
 
-                        // Keep the due list fresh across midnight (cheap check).
-                        try g_due_today.maybeRefresh(allocator, ctx.index);
-
                         const vlen = g_due_today.visible.items.len;
                         if (vlen == 0) break;
 

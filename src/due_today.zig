@@ -1,18 +1,16 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const task_mod = @import("task_index.zig");
 const TaskIndex = task_mod.TaskIndex;
-const Task = task_mod.Task;
 
-const c = @cImport({
-    @cInclude("time.h");
-});
+const store = @import("task_store.zig");
+const Task = store.Task;
 
 pub const DueToday = struct {
     visible: std.ArrayListUnmanaged(usize) = .{},
-    cached_key: i64 = std.math.minInt(i64),
-    today_iso: [10]u8 = "1970-01-01".*,
+
+    today_buf: [10]u8 = [_]u8{'0'} ** 10,
+    today_valid: bool = false,
 
     pub fn deinit(self: *DueToday, allocator: std.mem.Allocator) void {
         self.visible.deinit(allocator);
@@ -20,91 +18,85 @@ pub const DueToday = struct {
     }
 
     pub fn todayIso(self: *const DueToday) []const u8 {
-        return self.today_iso[0..10];
+        return self.today_buf[0..];
     }
 
     pub fn refresh(self: *DueToday, allocator: std.mem.Allocator, index: *const TaskIndex) !void {
-        const t = getLocalToday();
-        self.cached_key = t.key;
-        self.today_iso = t.iso;
-        try self.rebuildWithIso(allocator, index, self.todayIso());
-    }
+        try self.ensureTodayLocal();
 
-    pub fn maybeRefresh(self: *DueToday, allocator: std.mem.Allocator, index: *const TaskIndex) !void {
-        const t = getLocalToday();
-        if (t.key == self.cached_key) return;
+        const today = self.today_buf[0..];
 
-        self.cached_key = t.key;
-        self.today_iso = t.iso;
-        try self.rebuildWithIso(allocator, index, self.todayIso());
-    }
-
-    fn rebuildWithIso(
-        self: *DueToday,
-        allocator: std.mem.Allocator,
-        index: *const TaskIndex,
-        today: []const u8,
-    ) !void {
         self.visible.clearRetainingCapacity();
 
         const todos = index.todoSlice();
-        if (todos.len == 0) return;
-
         try self.visible.ensureTotalCapacity(allocator, todos.len);
 
-        for (todos, 0..) |t, ti| {
-            if (t.status == .done) continue;
+        for (todos, 0..) |t, i| {
+            // Defensive: only canonical ISO dates qualify.
             if (t.due_date.len != 10) continue;
             if (std.mem.eql(u8, t.due_date, today)) {
-                try self.visible.append(allocator, ti);
+                try self.visible.append(allocator, i); // index into todoSlice()
             }
         }
     }
 
-    fn getLocalToday() struct { key: i64, iso: [10]u8 } {
-        comptime {
-            if (!builtin.link_libc) {
-                @compileError("due_today requires libc for local civil date (localtime_r). Build with libc enabled.");
+    pub fn maybeRefresh(self: *DueToday, allocator: std.mem.Allocator, index: *const TaskIndex) !void {
+        var tmp: [10]u8 = undefined;
+        if (!fillTodayLocalIso(&tmp)) return;
+
+        if (!self.today_valid or !std.mem.eql(u8, self.today_buf[0..], tmp[0..])) {
+            self.today_buf = tmp;
+            self.today_valid = true;
+            try self.refreshNoRecalc(allocator, index, self.today_buf[0..]);
+        }
+    }
+
+    fn refreshNoRecalc(self: *DueToday, allocator: std.mem.Allocator, index: *const TaskIndex, today: []const u8) !void {
+        self.visible.clearRetainingCapacity();
+
+        const todos = index.todoSlice();
+        try self.visible.ensureTotalCapacity(allocator, todos.len);
+
+        for (todos, 0..) |t, i| {
+            if (t.due_date.len != 10) continue;
+            if (std.mem.eql(u8, t.due_date, today)) {
+                try self.visible.append(allocator, i);
             }
         }
+    }
 
-        var out: [10]u8 = undefined;
+    fn ensureTodayLocal(self: *DueToday) !void {
+        if (self.today_valid) return;
 
-        var now: c.time_t = @intCast(std.time.timestamp());
-        var tm: c.tm = undefined;
-        if (c.localtime_r(&now, &tm) == null) {
-            return .{ .key = 0, .iso = "1970-01-01".* };
+        var tmp: [10]u8 = undefined;
+        if (!fillTodayLocalIso(&tmp)) {
+            // Fail closed: keep a stable sentinel instead of returning a dangling slice.
+            self.today_buf = [_]u8{'0'} ** 10;
+            self.today_valid = true;
+            return;
         }
 
-        const year: i32 = @intCast(tm.tm_year + 1900);
-        const mon: u8 = @intCast(tm.tm_mon + 1);
-        const day: u8 = @intCast(tm.tm_mday);
-
-        write4(out[0..4], year);
-        out[4] = '-';
-        write2(out[5..7], mon);
-        out[7] = '-';
-        write2(out[8..10], day);
-
-        // Key that changes once per local calendar day.
-        const key: i64 =
-            @as(i64, @intCast(tm.tm_year)) * 400 +
-            @as(i64, @intCast(tm.tm_yday));
-
-        return .{ .key = key, .iso = out };
-    }
-
-    fn write2(dst: []u8, v: u8) void {
-        dst[0] = '0' + @as(u8, @intCast(v / 10));
-        dst[1] = '0' + @as(u8, @intCast(v % 10));
-    }
-
-    fn write4(dst: []u8, y: i32) void {
-        var yy: u32 = if (y < 0) 0 else @intCast(y);
-        if (yy > 9999) yy = 9999;
-        dst[0] = '0' + @as(u8, @intCast((yy / 1000) % 10));
-        dst[1] = '0' + @as(u8, @intCast((yy / 100) % 10));
-        dst[2] = '0' + @as(u8, @intCast((yy / 10) % 10));
-        dst[3] = '0' + @as(u8, @intCast(yy % 10));
+        self.today_buf = tmp;
+        self.today_valid = true;
     }
 };
+
+fn fillTodayLocalIso(out: *[10]u8) bool {
+    comptime {
+        if (!std.builtin.link_libc) {
+            @compileError("due_today requires libc for local civil date (localtime_r). Build with libc enabled.");
+        }
+    }
+
+    var now: std.c.time_t = @intCast(std.time.timestamp());
+
+    var tm: std.c.tm = undefined;
+    if (std.c.localtime_r(&now, &tm) == null) return false;
+
+    const year: i32 = tm.tm_year + 1900;
+    const mon: i32 = tm.tm_mon + 1;
+    const mday: i32 = tm.tm_mday;
+
+    const s = std.fmt.bufPrint(out.*[0..], "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, mon, mday }) catch return false;
+    return s.len == 10;
+}
