@@ -90,6 +90,183 @@ inline fn graphemeFromByte(b: u8) []const u8 {
 }
 
 
+pub fn run(
+    allocator: std.mem.Allocator,
+    ctx: *TuiContext,
+    ui: *UiState,
+) !void {
+    var buffer: [1024]u8 = undefined;
+    var tty = try vaxis.Tty.init(&buffer);
+    defer tty.deinit();
+
+    var vx = try vaxis.init(allocator, .{});
+    defer vx.deinit(allocator, tty.writer());
+
+
+    defer g_visible_todo.deinit(allocator);
+    defer g_visible_done.deinit(allocator);
+    defer g_due_today.deinit(allocator);
+
+    var view: AppView = .list;
+    var editor = EditorState.init();
+    var due_view: ListView = .{
+        .selected_index = 0,
+        .scroll_offset = 0,
+        .last_move = 0,
+    };
+
+    var list_cmd_active = false;
+    var list_cmd_new = false;
+    var list_cmd_done = false;
+    var list_cmd_edit = false;
+
+
+    var loop: vaxis.Loop(Event) = .{
+        .tty = &tty,
+        .vaxis = &vx,
+    };
+    try loop.init();
+    try loop.start();
+    defer loop.stop();
+
+    try vx.enterAltScreen(tty.writer());
+    defer {
+        var w = tty.writer();
+
+        // Leave alt screen and reset vaxis state
+        _ = vx.exitAltScreen(w) catch {};
+        _ = vx.resetState(w) catch {};
+
+        // Force-disable Kitty keyboard protocol so later programs
+        // (fzf, shells, tmux panes) see normal keycodes again.
+        _ = w.writeAll("\x1b[>0u") catch {};
+    }
+
+    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
+
+    try processRepeats(ctx, allocator);
+
+    try rebuildVisibleAll(allocator, ctx.index);
+    try g_due_today.refresh(allocator, ctx.index);
+
+    var running = true;
+    while (running) {
+        const event = loop.nextEvent();
+
+        switch (event) {
+            .key_press => |key| {
+                // Ctrl-C always exits the whole app.
+                if (key.matches('c', .{ .ctrl = true })) {
+                    running = false;
+                } else switch (view) {
+                    .list => {
+                        if (list_cmd_active) {
+                            try handleListCommandKey(
+                                key,
+                                &view,
+                                &editor,
+                                &list_cmd_active,
+                                &list_cmd_new,
+                                &list_cmd_done,
+                                &list_cmd_edit,
+                                ctx,
+                                allocator,
+                                ui,
+                            );
+                            break;
+                        }
+
+                        if (key.matches(':', .{})) {
+                            // Start list-view ":" command-line
+                            list_cmd_active = true;
+                            list_cmd_new = false;
+                            list_cmd_done = false;
+                            list_cmd_edit = false;
+                            break;
+                        }
+
+                        // Fullscreen due-today pane toggle (disabled while sidebar is focused).
+                        if (key.matches('d', .{}) and !g_projects_focus) {
+                            g_projects_focus = false;
+                            try g_due_today.refresh(allocator, ctx.index);
+                            view = .due_today;
+                            break;
+                        }
+
+                        // Focus keys (projects pane, Tab, H/L) have priority.
+                        if (try handleListFocusKey(key, ui, ctx.index, allocator)) {
+                            break;
+                        }
+
+                        if (g_projects_focus) {
+                            // Sidebar is focused; suppress task actions/navigation.
+                            break;
+                        }
+
+                        if (key.matches('@', .{})) {
+                            try toggleTodoOngoing(ctx, allocator, ui);
+                        } else if (key.matches('X', .{})) {
+                            try toggleDoneTodo(ctx, allocator, ui);
+                        } else {
+                            handleNavigation(&vx, ctx.index, ui, key);
+                        }
+                    },
+                    .due_today => {
+                        // Toggle back to the main list.
+                        if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
+                            view = .list;
+                            break;
+                        }
+
+                        // Keep the due list fresh across midnight (cheap check).
+                        try g_due_today.maybeRefresh(allocator, ctx.index);
+
+                        const vlen = g_due_today.visible.items.len;
+                        if (vlen == 0) break;
+
+                        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+                            moveListViewSelection(&due_view, vlen, 1);
+                        } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+                            moveListViewSelection(&due_view, vlen, -1);
+                        }
+                    },
+                    .editor => {
+                        try handleEditorKey(key, &view, &editor, ctx, allocator, ui);
+                    },
+                }
+            },
+            .winsize => |ws| {
+                try vx.resize(allocator, tty.writer(), ws);
+            },
+        }
+
+        try processRepeats(ctx, allocator);
+        try g_due_today.maybeRefresh(allocator, ctx.index);
+
+        const win = vx.window();
+        clearAll(win);
+
+        switch (view) {
+            .list => {
+                drawHeader(win);
+                drawCounts(win, ctx.index, ui);
+                drawProjectsPane(win, ctx.index, ui.focus);
+                drawTodoList(win, ctx.index, ui, list_cmd_active);
+                drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done, list_cmd_edit);
+            },
+            .due_today => {
+                drawDueTodayView(win,ctx.index,&due_view);
+            },
+            .editor => {
+                drawEditorView(win, &editor);
+            },
+        }
+
+        try vx.render(tty.writer());
+    }
+}
+
+
 fn civilFromDays(days_since_epoch: i64) struct { y: i32, m: u8, d: u8 } {
     // Howard Hinnant: civil_from_days; days_since_epoch is relative to 1970-01-01.
     const z: i64 = days_since_epoch + 719468;
@@ -760,181 +937,6 @@ const EditorState = struct {
 };
 
 
-pub fn run(
-    allocator: std.mem.Allocator,
-    ctx: *TuiContext,
-    ui: *UiState,
-) !void {
-    var buffer: [1024]u8 = undefined;
-    var tty = try vaxis.Tty.init(&buffer);
-    defer tty.deinit();
-
-    var vx = try vaxis.init(allocator, .{});
-    defer vx.deinit(allocator, tty.writer());
-
-
-    defer g_visible_todo.deinit(allocator);
-    defer g_visible_done.deinit(allocator);
-    defer g_due_today.deinit(allocator);
-
-    var view: AppView = .list;
-    var editor = EditorState.init();
-    var due_view: ListView = .{
-        .selected_index = 0,
-        .scroll_offset = 0,
-        .last_move = 0,
-    };
-
-    var list_cmd_active = false;
-    var list_cmd_new = false;
-    var list_cmd_done = false;
-    var list_cmd_edit = false;
-
-
-    var loop: vaxis.Loop(Event) = .{
-        .tty = &tty,
-        .vaxis = &vx,
-    };
-    try loop.init();
-    try loop.start();
-    defer loop.stop();
-
-    try vx.enterAltScreen(tty.writer());
-    defer {
-        var w = tty.writer();
-
-        // Leave alt screen and reset vaxis state
-        _ = vx.exitAltScreen(w) catch {};
-        _ = vx.resetState(w) catch {};
-
-        // Force-disable Kitty keyboard protocol so later programs
-        // (fzf, shells, tmux panes) see normal keycodes again.
-        _ = w.writeAll("\x1b[>0u") catch {};
-    }
-
-    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
-
-    try processRepeats(ctx, allocator);
-
-    try rebuildVisibleAll(allocator, ctx.index);
-    try g_due_today.refresh(allocator, ctx.index);
-
-    var running = true;
-    while (running) {
-        const event = loop.nextEvent();
-
-        switch (event) {
-            .key_press => |key| {
-                // Ctrl-C always exits the whole app.
-                if (key.matches('c', .{ .ctrl = true })) {
-                    running = false;
-                } else switch (view) {
-                    .list => {
-                        if (list_cmd_active) {
-                            try handleListCommandKey(
-                                key,
-                                &view,
-                                &editor,
-                                &list_cmd_active,
-                                &list_cmd_new,
-                                &list_cmd_done,
-                                &list_cmd_edit,
-                                ctx,
-                                allocator,
-                                ui,
-                            );
-                            break;
-                        }
-
-                        if (key.matches(':', .{})) {
-                            // Start list-view ":" command-line
-                            list_cmd_active = true;
-                            list_cmd_new = false;
-                            list_cmd_done = false;
-                            list_cmd_edit = false;
-                            break;
-                        }
-
-                        // Fullscreen due-today pane toggle (disabled while sidebar is focused).
-                        if (key.matches('d', .{}) and !g_projects_focus) {
-                            g_projects_focus = false;
-                            try g_due_today.refresh(allocator, ctx.index);
-                            view = .due_today;
-                            break;
-                        }
-
-                        // Focus keys (projects pane, Tab, H/L) have priority.
-                        if (try handleListFocusKey(key, ui, ctx.index, allocator)) {
-                            break;
-                        }
-
-                        if (g_projects_focus) {
-                            // Sidebar is focused; suppress task actions/navigation.
-                            break;
-                        }
-
-                        if (key.matches('@', .{})) {
-                            try toggleTodoOngoing(ctx, allocator, ui);
-                        } else if (key.matches('X', .{})) {
-                            try toggleDoneTodo(ctx, allocator, ui);
-                        } else {
-                            handleNavigation(&vx, ctx.index, ui, key);
-                        }
-                    },
-                    .due_today => {
-                        // Toggle back to the main list.
-                        if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
-                            view = .list;
-                            break;
-                        }
-
-                        // Keep the due list fresh across midnight (cheap check).
-                        try g_due_today.maybeRefresh(allocator, ctx.index);
-
-                        const vlen = g_due_today.visible.items.len;
-                        if (vlen == 0) break;
-
-                        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-                            moveListViewSelection(&due_view, vlen, 1);
-                        } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-                            moveListViewSelection(&due_view, vlen, -1);
-                        }
-                    },
-                    .editor => {
-                        try handleEditorKey(key, &view, &editor, ctx, allocator, ui);
-                    },
-                }
-            },
-            .winsize => |ws| {
-                try vx.resize(allocator, tty.writer(), ws);
-            },
-        }
-
-        try processRepeats(ctx, allocator);
-        try g_due_today.maybeRefresh(allocator, ctx.index);
-
-        const win = vx.window();
-        clearAll(win);
-
-        switch (view) {
-            .list => {
-                drawHeader(win);
-                drawCounts(win, ctx.index, ui);
-                drawProjectsPane(win, ctx.index, ui.focus);
-                drawTodoList(win, ctx.index, ui, list_cmd_active);
-                drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done, list_cmd_edit);
-            },
-            .due_today => {
-                drawDueTodayView(win,ctx.index,&due_view);
-            },
-            .editor => {
-                drawEditorView(win, &editor);
-            },
-        }
-
-        try vx.render(tty.writer());
-    }
-}
 
 fn drawDueTodayView(win: vaxis.Window, index: *const TaskIndex, due_view: *ListView) void {
     const term_w: usize = @intCast(win.width);

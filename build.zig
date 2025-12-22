@@ -84,12 +84,15 @@ pub fn build(b: *std.Build) void {
     });
 
 
-// libvaxis dependency
+    // libvaxis dependency
     const vaxis_dep = b.dependency("vaxis", .{
         .target = target,
         .optimize = optimize,
     });
     exe.root_module.addImport("vaxis", vaxis_dep.module("vaxis"));
+
+    // enable libc
+    exe.linkLibC();
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
