@@ -71,6 +71,7 @@ pub const TuiContext = struct {
 
 const AppView = enum {
     list,
+    due_today,
     editor,
 };
 
@@ -962,73 +963,119 @@ fn drawDueTodayList(win: vaxis.Window, index: *const TaskIndex, due_view: *ListV
     const todos = index.todoSlice();
 
     const term_h: usize = @intCast(win.height);
-    const term_w: usize = @intCast(win.width);
-    if (term_h == 0 or term_w == 0) return;
+    if (term_h == 0) return;
 
     const list_start: usize = 2;
     const reserved_rows: usize = if (term_h > 1) 1 else 0;
-    if (term_h <= list_start + reserved_rows) return;
-
-    const viewport_h: usize = term_h - list_start - reserved_rows;
-    if (viewport_h == 0) return;
 
     if (visible.len == 0) {
-        const style: vaxis.Style = .{ .fg = .{ .index = 8 } };
-        drawCenteredText(win, @intCast(list_start), "(none due today)", style);
+        if (term_h > list_start) {
+            const style: vaxis.Style = .{ .fg = .{ .index = 8 } };
+            drawCenteredText(win, @intCast(list_start), "(none due today)", style);
+        }
         due_view.selected_index = 0;
         due_view.scroll_offset = 0;
         due_view.last_move = 0;
         return;
     }
 
-    if (due_view.selected_index >= visible.len) due_view.selected_index = visible.len - 1;
-    if (due_view.scroll_offset >= visible.len) due_view.scroll_offset = 0;
+    drawTaskListCore(
+        win,
+        todos,
+        visible,
+        due_view,
+        list_start,
+        reserved_rows,
+        0,      // no projects pane in this fullscreen view
+        false,  // never suppress the selection indicator here
+    );
+}
 
-    // Classic gutter: "> " then status/prio/text.
-    const arrow_col: u16 = 0;
-    const pad_col: u16 = 1;
-    const content_start_col: u16 = 2;
+fn drawTaskListCore(
+    win: vaxis.Window,
+    tasks_all: []const Task,
+    visible: []const usize,
+    view: *ListView,
+    list_start_row: usize,
+    reserved_rows: usize,
+    proj_pane_width: usize,
+    suppress_indicator: bool,
+) void {
+    const term_height: usize = @intCast(win.height);
+    const term_width: usize = @intCast(win.width);
+    if (term_height == 0 or term_width == 0) return;
+    if (visible.len == 0) return;
 
-    if (@as(usize, content_start_col) >= term_w) return;
-    const content_w: usize = term_w - @as(usize, content_start_col);
-    if (content_w <= STATUS_WIDTH) return;
+    if (term_height <= list_start_row + reserved_rows) return;
+    const viewport_height: usize = term_height - list_start_row - reserved_rows;
+    if (viewport_height == 0) return;
 
-    const dir = due_view.last_move;
-    if (!isSelectionFullyVisible(due_view, todos, visible, viewport_h, content_w)) {
-        recomputeScrollOffsetForSelection(due_view, todos, visible, viewport_h, content_w, dir);
+    if (view.selected_index >= visible.len) view.selected_index = visible.len - 1;
+    if (view.scroll_offset >= visible.len) view.scroll_offset = 0;
+
+    var arrow_col_usize: usize = 0;
+    var pad_col_usize: usize = 1;
+    var content_start_col_usize: usize = 2;
+
+    if (proj_pane_width != 0) {
+        arrow_col_usize = proj_pane_width;
+        pad_col_usize = proj_pane_width + 1;
+        content_start_col_usize = proj_pane_width + 2;
+    }
+
+    if (content_start_col_usize >= term_width) return;
+    const content_width: usize = term_width - content_start_col_usize;
+    if (content_width <= STATUS_WIDTH) return;
+
+    const arrow_col: u16 = @intCast(arrow_col_usize);
+    const pad_col: u16 = @intCast(pad_col_usize);
+    const content_start_col: u16 = @intCast(content_start_col_usize);
+
+    const dir = view.last_move;
+    if (!isSelectionFullyVisible(view, tasks_all, visible, viewport_height, content_width)) {
+        recomputeScrollOffsetForSelection(view, tasks_all, visible, viewport_height, content_width, dir);
     }
 
     const indicator_slice = ">"[0..1];
     const space_slice = " "[0..1];
 
     const base_style: vaxis.Style = .{};
-    const sel_style: vaxis.Style = .{ .bold = true, .fg = .{ .index = 7 } };
+    const sel_style: vaxis.Style = .{
+        .bold = true,
+        .fg = .{ .index = 7 },
+    };
 
-    var row: usize = list_start;
-    var remaining: usize = viewport_h;
-    var vi: usize = due_view.scroll_offset;
+    var row: usize = list_start_row;
+    var remaining_rows: usize = viewport_height;
+    var vi: usize = view.scroll_offset;
 
-    while (vi < visible.len and remaining > 0 and row < term_h) : (vi += 1) {
-        const t = todos[visible[vi]];
-        const selected = (due_view.selected_index == vi);
+    while (vi < visible.len and remaining_rows > 0 and row < term_height) : (vi += 1) {
+        const task = tasks_all[visible[vi]];
+        const selected = (view.selected_index == vi);
         const style = if (selected) sel_style else base_style;
 
-        var layout = computeLayout(t, content_w);
+        var layout = computeLayout(task, content_width);
         if (layout.rows == 0) layout.rows = 1;
-        if (layout.rows > remaining) break;
+        if (layout.rows > remaining_rows) break;
 
         const row_u16: u16 = @intCast(row);
 
-        _ = win.writeCell(arrow_col, row_u16, .{
-            .char = .{ .grapheme = if (selected) indicator_slice else space_slice, .width = 1 },
-            .style = style,
-        });
-        _ = win.writeCell(pad_col, row_u16, .{
-            .char = .{ .grapheme = space_slice, .width = 1 },
-            .style = style,
-        });
+        if (arrow_col < win.width) {
+            const g = if (selected and !suppress_indicator) indicator_slice else space_slice;
+            _ = win.writeCell(arrow_col, row_u16, .{
+                .char = .{ .grapheme = g, .width = 1 },
+                .style = style,
+            });
+        }
 
-        const status_text: []const u8 = switch (t.status) {
+        if (pad_col < win.width) {
+            _ = win.writeCell(pad_col, row_u16, .{
+                .char = .{ .grapheme = space_slice, .width = 1 },
+                .style = style,
+            });
+        }
+
+        const status_text: []const u8 = switch (task.status) {
             .todo => "[ ]",
             .ongoing => "[@]",
             .done => "[x]",
@@ -1043,6 +1090,7 @@ fn drawDueTodayList(win: vaxis.Window, index: *const TaskIndex, due_view: *ListV
             });
             col_status += 1;
         }
+
         if (col_status < win.width) {
             _ = win.writeCell(col_status, row_u16, .{
                 .char = .{ .grapheme = space_slice, .width = 1 },
@@ -1052,17 +1100,31 @@ fn drawDueTodayList(win: vaxis.Window, index: *const TaskIndex, due_view: *ListV
         }
 
         var text_start_col: u16 = col_status;
-        if (t.priority != 0 and col_status < win.width) {
-            text_start_col = drawPriorityPrefix(win, row_u16, col_status, t.priority, style);
+        if (task.priority != 0 and col_status < win.width) {
+            text_start_col = drawPriorityPrefix(
+                win,
+                row_u16,
+                col_status,
+                task.priority,
+                style,
+            );
         }
 
-        if (content_w > layout.prefix) {
-            const text_w: usize = content_w - layout.prefix;
-            drawWrappedTask(win, t, row, @intCast(text_start_col), layout.rows, text_w, style);
+        if (content_width > layout.prefix) {
+            const text_width = content_width - layout.prefix;
+            drawWrappedTask(
+                win,
+                task,
+                row,
+                @intCast(text_start_col),
+                layout.rows,
+                text_width,
+                style,
+            );
         }
 
         row += layout.rows;
-        remaining -= layout.rows;
+        remaining_rows -= layout.rows;
     }
 }
 
@@ -3602,173 +3664,19 @@ fn drawTodoList(
 
     const reserved_rows: usize =
         if (cmd_active and term_height > LIST_START_ROW + 1) 1 else 0;
-    if (term_height <= LIST_START_ROW + reserved_rows) return;
 
-    const viewport_height = term_height - LIST_START_ROW - reserved_rows;
-    if (viewport_height == 0) return;
-
-    if (view.selected_index >= visible.len) {
-        view.selected_index = visible.len - 1;
-    }
-    if (view.scroll_offset >= visible.len) {
-        view.scroll_offset = 0;
-    }
 
     const proj_pane_width = computeProjectsPaneWidth(term_width);
 
-    var arrow_col_usize: usize = 0;
-    var pad_col_usize: usize = 1;
-    var content_start_col_usize: usize = 2;
+    drawTaskListCore(
+        win,
+        tasks_all,
+        visible,
+        view,
+        LIST_START_ROW,
+        reserved_rows,
+        proj_pane_width,
+        g_projects_focus,
+    );
 
-    if (proj_pane_width != 0) {
-        arrow_col_usize = proj_pane_width;
-        pad_col_usize = proj_pane_width + 1;
-        content_start_col_usize = proj_pane_width + 2;
-    }
-
-    if (content_start_col_usize >= term_width) return;
-
-    const content_width: usize = term_width - content_start_col_usize;
-    if (content_width <= STATUS_WIDTH) return;
-
-    const arrow_col: u16 = @intCast(arrow_col_usize);
-    const pad_col: u16 = @intCast(pad_col_usize);
-    const content_start_col: u16 = @intCast(content_start_col_usize);
-
-    const dir = view.last_move;
-    if (!isSelectionFullyVisible(view, tasks_all, visible, viewport_height, content_width)) {
-        recomputeScrollOffsetForSelection(view, tasks_all, visible, viewport_height, content_width, dir);
-    }
-
-    const indicator_slice = ">"[0..1];
-    const space_slice = " "[0..1];
-
-    const base_style: vaxis.Style = .{};
-    const sel_style: vaxis.Style = .{
-        .bold = true,
-        .fg = .{ .index = 7 },
-    };
-
-    var row: usize = LIST_START_ROW;
-    var remaining_rows: usize = viewport_height;
-
-    var vi: usize = view.scroll_offset;
-    while (vi < visible.len and remaining_rows > 0 and row < term_height) : (vi += 1) {
-        const task = tasks_all[visible[vi]];
-        const selected = (view.selected_index == vi);
-        const style = if (selected) sel_style else base_style;
-
-        var layout = computeLayout(task, content_width);
-        if (layout.rows == 0) layout.rows = 1;
-
-        const rows_needed = layout.rows;
-        const prefix = layout.prefix;
-
-        if (rows_needed > remaining_rows) break;
-
-        const row_u16: u16 = @intCast(row);
-
-        if (arrow_col < win.width) {
-            const g = if (selected and !g_projects_focus) indicator_slice else space_slice;
-            _ = win.writeCell(arrow_col, row_u16, .{
-                .char = .{ .grapheme = g, .width = 1 },
-                .style = style,
-            });
-        }
-        if (pad_col < win.width) {
-            _ = win.writeCell(pad_col, row_u16, .{
-                .char = .{ .grapheme = space_slice, .width = 1 },
-                .style = style,
-            });
-        }
-
-        const status_text: []const u8 = switch (task.status) {
-            .todo => "[ ]",
-            .ongoing => "[@]",
-            .done => "[x]",
-        };
-
-        var col_status: u16 = content_start_col;
-        var s_i: usize = 0;
-        while (s_i < status_text.len and col_status < win.width) : (s_i += 1) {
-            const g = status_text[s_i .. s_i + 1];
-            _ = win.writeCell(col_status, row_u16, .{
-                .char = .{ .grapheme = g, .width = 1 },
-                .style = style,
-            });
-            col_status += 1;
-        }
-        if (col_status < win.width) {
-            _ = win.writeCell(col_status, row_u16, .{
-                .char = .{ .grapheme = space_slice, .width = 1 },
-                .style = style,
-            });
-            col_status += 1;
-        }
-
-    // created: "[YYYY-MM-DD] "
-    if (task.created_ms != 0 and col_status < win.width) {
-        var ymd: [10]u8 = undefined;
-        if (isoDateFromEpochMs(task.created_ms, &ymd)) {
-            // '['
-            _ = win.writeCell(col_status, row_u16, .{
-                .char = .{ .grapheme = graphemeFromByte('['), .width = 1 },
-                .style = style,
-            });
-            col_status += 1;
-
-            var di: usize = 0;
-            while (di < ymd.len and col_status < win.width) : (di += 1) {
-                _ = win.writeCell(col_status, row_u16, .{
-                    .char = .{ .grapheme = graphemeFromByte(ymd[di]), .width = 1 },
-                    .style = style,
-                });
-                col_status += 1;
-            }
-
-            if (col_status < win.width) {
-                _ = win.writeCell(col_status, row_u16, .{
-                    .char = .{ .grapheme = graphemeFromByte(']'), .width = 1 },
-                    .style = style,
-                });
-                col_status += 1;
-            }
-
-            if (col_status < win.width) {
-                _ = win.writeCell(col_status, row_u16, .{
-                    .char = .{ .grapheme = space_slice, .width = 1 },
-                    .style = style,
-                });
-                col_status += 1;
-            }
-        }
-    }
-
-        var text_start_col: u16 = col_status;
-        if (task.priority != 0 and col_status < win.width) {
-            text_start_col = drawPriorityPrefix(
-                win,
-                row_u16,
-                col_status,
-                task.priority,
-                style,
-            );
-        }
-
-        if (content_width > prefix) {
-            const text_width = content_width - prefix;
-            drawWrappedTask(
-                win,
-                task,
-                row,
-                @intCast(text_start_col),
-                rows_needed,
-                text_width,
-                style,
-            );
-        }
-
-        row += rows_needed;
-        remaining_rows -= rows_needed;
-    }
 }
