@@ -975,6 +975,10 @@ fn drawDueTodayList(win: vaxis.Window, index: *const TaskIndex, due_view: *ListV
         due_view.selected_index = 0;
         due_view.scroll_offset = 0;
         due_view.last_move = 0;
+
+        const style: vaxis.Style = .{ .fg = .{ .index = 8 } };
+        drawCenteredText(win, @intCast(list_start + (term_h / 2)), "No tasks due today", style);
+
         return;
     }
 
