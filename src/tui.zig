@@ -56,6 +56,27 @@ var g_visible_done = std.ArrayListUnmanaged(usize){};
 
 var g_due_today: due_today_mod.DueToday = .{};
 
+
+var g_dbg_seq: u64 = 0;
+
+
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    // Unbuffered writer: every call becomes direct syscalls.
+    // For debugging, this is desirable because it survives abrupt exits.
+    var wr = std.fs.File.stderr().writer(&.{});
+    const w = &wr.interface;
+    w.print(fmt, args) catch {};
+    w.print("\n", .{}) catch {};
+}
+
+
+const builtin = @import("builtin");
+
+inline fn trace(comptime fmt: []const u8, args: anytype) void {
+    if (builtin.mode != .Debug) return;
+    std.debug.print(fmt, args);
+}
+
 /// Event type for the libvaxis low-level loop.
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -121,6 +142,8 @@ pub fn run(
     var list_cmd_edit = false;
 
 
+
+
     var loop: vaxis.Loop(Event) = .{
         .tty = &tty,
         .vaxis = &vx,
@@ -152,84 +175,103 @@ pub fn run(
     var running = true;
     while (running) {
         const event = loop.nextEvent();
+        g_dbg_seq += 1;
 
         switch (event) {
             .key_press => |key| {
-                // Ctrl-C always exits the whole app.
-                if (key.matches('c', .{ .ctrl = true })) {
-                    running = false;
-                } else switch (view) {
-                    .list => {
-                        if (list_cmd_active) {
-                            try handleListCommandKey(
-                                key,
-                                &view,
-                                &editor,
-                                &list_cmd_active,
-                                &list_cmd_new,
-                                &list_cmd_done,
-                                &list_cmd_edit,
-                                ctx,
-                                allocator,
-                                ui,
-                            );
-                            break;
-                        }
+                keypress: {
+                    if (key.matches('c', .{ .ctrl = true })) {
+                        running = false;
+                        break :keypress;
+                    }
 
-                        if (key.matches(':', .{})) {
-                            // Start list-view ":" command-line
-                            list_cmd_active = true;
-                            list_cmd_new = false;
-                            list_cmd_done = false;
-                            list_cmd_edit = false;
-                            break;
-                        }
+                    switch (view) {
+                        .list => {
+                            if (list_cmd_active) {
+                                try handleListCommandKey(
+                                    key,
+                                    &view,
+                                    &editor,
+                                    &list_cmd_active,
+                                    &list_cmd_new,
+                                    &list_cmd_done,
+                                    &list_cmd_edit,
+                                    ctx,
+                                    allocator,
+                                    ui,
+                                );
+                                break :keypress;
+                            }
 
-                        // Fullscreen due-today pane toggle (disabled while sidebar is focused).
-                        if (key.matches('d', .{}) and !g_projects_focus) {
-                            g_projects_focus = false;
-                            try g_due_today.refresh(allocator, ctx.index);
-                            view = .due_today;
-                            break;
-                        }
+                            if (key.matches(':', .{})) {
+                                list_cmd_active = true;
+                                list_cmd_new = false;
+                                list_cmd_done = false;
+                                list_cmd_edit = false;
+                                break :keypress;
+                            }
 
-                        // Focus keys (projects pane, Tab, H/L) have priority.
-                        if (try handleListFocusKey(key, ui, ctx.index, allocator)) {
-                            break;
-                        }
+                            if (key.matches('d', .{}) and !g_projects_focus) {
+                                g_projects_focus = false;
+                                try g_due_today.refresh(allocator, ctx.index);
+                                view = .due_today;
+                                break :keypress;
+                            }
 
-                        if (g_projects_focus) {
-                            // Sidebar is focused; suppress task actions/navigation.
-                            break;
-                        }
+                            if (try handleListFocusKey(key, ui, ctx.index, allocator)) {
+                                break :keypress;
+                            }
 
-                        if (key.matches('@', .{})) {
-                            try toggleTodoOngoing(ctx, allocator, ui);
-                        } else if (key.matches('X', .{})) {
-                            try toggleDoneTodo(ctx, allocator, ui);
-                        } else {
+                            if (g_projects_focus) {
+                                break :keypress;
+                            }
+
+                            if (key.matches('@', .{})) {
+                                try toggleTodoOngoing(ctx, allocator, ui);
+                                break :keypress;
+                            }
+
+                            if (key.matches('X', .{})) {
+                                try toggleDoneTodo(ctx, allocator, ui);
+                                break :keypress;
+                            }
+
                             handleNavigation(&vx, ctx.index, ui, key);
-                        }
-                    },
-                    .due_today => {
-                        // Toggle back to the main list.
-                        if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
-                            view = .list;
-                            break;
-                        }
+                            break :keypress;
+                        },
 
-                        const vlen = g_due_today.visible.items.len;
-                        if (vlen == 0) break;
+                        .due_today => {
+                            if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
+                                view = .list;
+                                break :keypress;
+                            }
 
-                        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-                            moveListViewSelection(&due_view, vlen, 1);
-                        } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-                            moveListViewSelection(&due_view, vlen, -1);
-                        }
-                    },
-                    .editor => {
-                        try handleEditorKey(key, &view, &editor, ctx, allocator, ui);
-                    },
+                            try g_due_today.maybeRefresh(allocator, ctx.index);
+
+                            const vlen = g_due_today.visible.items.len;
+                            if (vlen == 0) {
+                                // do nothing; rendering handles the placeholder
+                                break :keypress;
+                            }
+
+                            if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+                                moveListViewSelection(&due_view, vlen, 1);
+                                break :keypress;
+                            }
+
+                            if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+                                moveListViewSelection(&due_view, vlen, -1);
+                                break :keypress;
+                            }
+
+                            break :keypress;
+                        },
+
+                        .editor => {
+                            try handleEditorKey(key, &view, &editor, ctx, allocator, ui);
+                            break :keypress;
+                        },
+                    }
                 }
             },
             .winsize => |ws| {
@@ -238,12 +280,15 @@ pub fn run(
         }
 
         try processRepeats(ctx, allocator);
-        try g_due_today.maybeRefresh(allocator, ctx.index);
 
+        try g_due_today.maybeRefresh(allocator, ctx.index);
         const win = vx.window();
         clearAll(win);
 
+
+
         switch (view) {
+
             .list => {
                 drawHeader(win);
                 drawCounts(win, ctx.index, ui);
@@ -252,14 +297,19 @@ pub fn run(
                 drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done, list_cmd_edit);
             },
             .due_today => {
-                drawDueTodayView(win,ctx.index,&due_view);
+        drawDueTodayView(win, ctx.index, &due_view);
             },
             .editor => {
                 drawEditorView(win, &editor);
             },
         }
 
-        try vx.render(tty.writer());
+
+
+        vx.render(tty.writer()) catch |err| {
+            dbg("RENDER: error {s}\n", .{@errorName(err)});
+            return err;
+        };
     }
 }
 
@@ -940,14 +990,12 @@ fn drawDueTodayView(win: vaxis.Window, index: *const TaskIndex, due_view: *ListV
     const term_h: usize = @intCast(win.height);
     if (term_w == 0 or term_h == 0) return;
 
-    const day_buf: [10]u8 = undefined;
-    _ = day_buf;
     const today = g_due_today.todayIso();
 
-    var hdr_buf: [32]u8 = undefined;
-    const hdr = std.fmt.bufPrint(&hdr_buf, "DUE TODAY {s}", .{today}) catch "DUE TODAY";
+    // var hdr_buf: [32]u8 = undefined;
+    // const hdr = std.fmt.bufPrint(&hdr_buf, "DUE TODAY {s}", .{today}) catch "DUE TODAY";
     const hdr_style: vaxis.Style = .{ .bold = true };
-    drawCenteredText(win, 0, hdr, hdr_style);
+    writeCenteredAscii2(win, 0, "DUE TODAY ", today, hdr_style);
 
     const hint_style: vaxis.Style = .{ .fg = .{ .index = 8 } };
     if (term_h >= 2) {
@@ -970,12 +1018,9 @@ fn drawDueTodayList(win: vaxis.Window, index: *const TaskIndex, due_view: *ListV
 
     if (visible.len == 0) {
         const style: vaxis.Style = .{ .fg = .{ .index = 8 } };
-        const msg_row_usize = @min(list_start + (term_h / 2), term_h - 1);
-        drawCenteredText(win, @intCast(msg_row_usize), "No tasks due today", style);
-
-        due_view.selected_index = 0;
-        due_view.scroll_offset = 0;
-        due_view.last_move = 0;
+        const mid_row_usize: usize = if (term_h == 0) 0 else @min(term_h / 2, term_h - 1);
+        writeCenteredAscii2(win, @intCast(mid_row_usize), "", "No tasks due today", style);
+        due_view.* = .{ .selected_index = 0, .scroll_offset = 0, .last_move = 0 };
         return;
     }
 
@@ -986,8 +1031,8 @@ fn drawDueTodayList(win: vaxis.Window, index: *const TaskIndex, due_view: *ListV
         due_view,
         list_start,
         reserved_rows,
-        0,      // no projects pane in this fullscreen view
-        false,  // never suppress the selection indicator here
+        0,
+        false,
     );
 }
 
@@ -1050,7 +1095,15 @@ fn drawTaskListCore(
     var vi: usize = view.scroll_offset;
 
     while (vi < visible.len and remaining_rows > 0 and row < term_height) : (vi += 1) {
-        const task = tasks_all[visible[vi]];
+
+        const orig = visible[vi];
+        if (orig >= tasks_all.len) {
+            dbg("DBG: visible index OOB: orig={d} tasks_all.len={d} vi={d} visible.len={d}\n",
+                .{ orig, tasks_all.len, vi, visible.len });
+            break;
+        }
+        const task = tasks_all[orig];
+
         const selected = (view.selected_index == vi);
         const style = if (selected) sel_style else base_style;
 
@@ -2238,7 +2291,7 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
 
 fn drawCenteredText(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.Style) void {
     if (win.height == 0 or win.width == 0) return;
-    if (row >= win.height) return;
+    if (row >= win.height) return; // hard bound check
 
     const term_width: usize = @intCast(win.width);
     const len: usize = text.len;
@@ -2250,10 +2303,38 @@ fn drawCenteredText(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.
     var i: usize = 0;
     while (i < len and col < term_width) : (i += 1) {
         const b: u8 = text[i];
-        const g: []const u8 = if (b < 128) graphemeFromByte(b) else "?"[0..1];
-
         _ = win.writeCell(@intCast(col), row, .{
-            .char = .{ .grapheme = g, .width = 1 },
+            .char = .{ .grapheme = graphemeFromByte(b), .width = 1 },
+            .style = style,
+        });
+        col += 1;
+    }
+}
+
+fn writeCenteredAscii2(win: vaxis.Window, row: u16, a: []const u8, b: []const u8, style: vaxis.Style) void {
+    if (win.height == 0 or win.width == 0) return;
+    if (row >= win.height) return;
+
+    const term_w: usize = @intCast(win.width);
+    const total: usize = a.len + b.len;
+
+    var start: usize = 0;
+    if (term_w > total) start = (term_w - total) / 2;
+
+    var col: usize = start;
+
+    for (a) |ch| {
+        if (col >= term_w) break;
+        _ = win.writeCell(@intCast(col), row, .{
+            .char = .{ .grapheme = graphemeFromByte(ch), .width = 1 },
+            .style = style,
+        });
+        col += 1;
+    }
+    for (b) |ch| {
+        if (col >= term_w) break;
+        _ = win.writeCell(@intCast(col), row, .{
+            .char = .{ .grapheme = graphemeFromByte(ch), .width = 1 },
             .style = style,
         });
         col += 1;

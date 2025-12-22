@@ -3,3 +3,4 @@
 .zig-cache
 todo.txt
 *.txt
+zig-out/bin/* 
