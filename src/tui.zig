@@ -129,6 +129,7 @@ pub fn run(
     defer g_due_today.deinit(allocator);
 
     var view: AppView = .list;
+    var return_view: AppView = .list;
     var editor = EditorState.init();
     var due_view: ListView = .{
         .selected_index = 0,
@@ -199,6 +200,7 @@ pub fn run(
                                     ctx,
                                     allocator,
                                     ui,
+                                    &due_view, &return_view,
                                 );
                                 break :keypress;
                             }
@@ -240,35 +242,85 @@ pub fn run(
                             break :keypress;
                         },
 
-                        .due_today => {
-                            if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
-                                view = .list;
-                                break :keypress;
-                            }
+            .due_today => {
+                if (list_cmd_active) {
+                    try handleListCommandKey(
+                        key, &view, &editor,
+                        &list_cmd_active, &list_cmd_new, &list_cmd_done, &list_cmd_edit,
+                        ctx, allocator, ui,
+                        &due_view, &return_view,
+                    );
+                    break :keypress;
+                }
 
-                            try g_due_today.maybeRefresh(allocator, ctx.index);
+                if (key.matches(':', .{})) {
+                    list_cmd_active = true;
+                    list_cmd_new = false;
+                    list_cmd_done = false;
+                    list_cmd_edit = false;
+                    break :keypress;
+                }
 
-                            const vlen = g_due_today.visible.items.len;
-                            if (vlen == 0) {
-                                // do nothing; rendering handles the placeholder
-                                break :keypress;
-                            }
+                if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
+                    view = .list;
+                    break :keypress;
+                }
 
-                            if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-                                moveListViewSelection(&due_view, vlen, 1);
-                                break :keypress;
-                            }
+                try g_due_today.maybeRefresh(allocator, ctx.index);
 
-                            if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-                                moveListViewSelection(&due_view, vlen, -1);
-                                break :keypress;
-                            }
+                const visible = g_due_today.visible.items;
+                const vlen = visible.len;
+                if (vlen == 0) break :keypress;
 
-                            break :keypress;
-                        },
+                clampViewToVisible(&due_view, vlen);
+                const sel_visible = due_view.selected_index;
+                const orig_idx = selectedOrigIndex(visible, &due_view) orelse break :keypress;
+
+                if (key.matches('@', .{})) {
+                    try toggleTodoOngoingAtOrig(ctx, allocator, orig_idx);
+
+                    const v2 = g_due_today.visible.items;
+                    const v2len = v2.len;
+                    if (v2len == 0) {
+                        due_view = .{};
+                    } else {
+                        due_view.selected_index = if (sel_visible >= v2len) (v2len - 1) else sel_visible;
+                        if (due_view.scroll_offset >= v2len) due_view.scroll_offset = 0;
+                        due_view.last_move = -1;
+                    }
+                    break :keypress;
+                }
+
+                if (key.matches('X', .{})) {
+                    try toggleDoneAtOrig(ctx, allocator, .todo, orig_idx);
+
+                    const v2 = g_due_today.visible.items;
+                    const v2len = v2.len;
+                    if (v2len == 0) {
+                        due_view = .{};
+                    } else {
+                        due_view.selected_index = if (sel_visible >= v2len) (v2len - 1) else sel_visible;
+                        if (due_view.scroll_offset >= v2len) due_view.scroll_offset = 0;
+                        due_view.last_move = -1;
+                    }
+                    break :keypress;
+                }
+
+                if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+                    moveListViewSelection(&due_view, vlen, 1);
+                    break :keypress;
+                }
+
+                if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+                    moveListViewSelection(&due_view, vlen, -1);
+                    break :keypress;
+                }
+
+                break :keypress;
+            },
 
                         .editor => {
-                            try handleEditorKey(key, &view, &editor, ctx, allocator, ui);
+                            try handleEditorKey(key, &view, &editor, ctx, allocator, ui, &return_view);
                             break :keypress;
                         },
                     }
@@ -297,7 +349,8 @@ pub fn run(
                 drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done, list_cmd_edit);
             },
             .due_today => {
-        drawDueTodayView(win, ctx.index, &due_view);
+                drawDueTodayView(win, ctx.index, &due_view);
+                drawListCommandLine(win, list_cmd_active, list_cmd_new, list_cmd_done, list_cmd_edit); // <--- add
             },
             .editor => {
                 drawEditorView(win, &editor);
@@ -1214,6 +1267,89 @@ inline fn clampViewToVisible(view: *ListView, visible_len: usize) void {
     }
     if (view.selected_index >= visible_len) view.selected_index = visible_len - 1;
     if (view.scroll_offset >= visible_len) view.scroll_offset = 0;
+}
+
+
+fn toggleTodoOngoingAtOrig(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    orig_idx: usize,
+) !void {
+    const todos = ctx.index.todoSlice();
+    if (orig_idx >= todos.len) return;
+
+    const old = todos[orig_idx];
+    var updated = old;
+    updated.status = if (old.status == .ongoing) .todo else .ongoing;
+    updated.repeat_next_ms = 0;
+
+    var todo_file = ctx.todo_file.*;
+    try store.rewriteJsonFileReplacingIndex(allocator, &todo_file, todos, orig_idx, updated);
+
+    try ctx.index.reload(allocator, todo_file, ctx.done_file.*);
+    try rebuildVisibleAll(allocator, ctx.index);
+}
+
+fn toggleDoneAtOrig(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    focus: ListKind,      // .todo => move to done, .done => resurrect to todo
+    orig_idx: usize,
+) !void {
+    if (focus == .todo) {
+        const todos = ctx.index.todoSlice();
+        if (orig_idx >= todos.len) return;
+
+        const original = todos[orig_idx];
+        const orig_id = original.id;
+        const orig_created = original.created_ms;
+
+        var moved = original;
+        moved.status = .done;
+
+        moved.repeat_next_ms = 0;
+        if (moved.repeat.len != 0) {
+            const now_ms = std.time.milliTimestamp();
+            moved.repeat_next_ms = computeRepeatNextMs(moved.repeat, now_ms);
+        }
+
+        moved.id = orig_id;
+        moved.created_ms = orig_created;
+
+        var done_file = ctx.done_file.*;
+        try store.appendJsonTaskLine(allocator, &done_file, moved);
+
+        var todo_file = ctx.todo_file.*;
+        try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, todos, orig_idx);
+
+        try ctx.index.reload(allocator, todo_file, done_file);
+        try rebuildVisibleAll(allocator, ctx.index);
+        return;
+    }
+
+    // focus == .done
+    const dones = ctx.index.doneSlice();
+    if (orig_idx >= dones.len) return;
+
+    const original = dones[orig_idx];
+    const orig_id = original.id;
+    const orig_created = original.created_ms;
+
+    var moved = original;
+    moved.status = .todo;
+    moved.repeat_next_ms = 0;
+
+    moved.id = orig_id;
+    moved.created_ms = orig_created;
+
+    var todo_file = ctx.todo_file.*;
+    try store.appendJsonTaskLine(allocator, &todo_file, moved);
+
+    var done_file = ctx.done_file.*;
+    try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, orig_idx);
+
+    try ctx.index.reload(allocator, todo_file, done_file);
+    try rebuildVisibleAll(allocator, ctx.index);
 }
 
 fn toggleTodoOngoing(
@@ -2325,6 +2461,7 @@ fn writeCenteredAscii2(win: vaxis.Window, row: u16, a: []const u8, b: []const u8
 }
 
 
+
 fn handleListCommandKey(
     key: vaxis.Key,
     view: *AppView,
@@ -2336,8 +2473,9 @@ fn handleListCommandKey(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
     ui: *UiState,
+    due_view: *ListView,        // <--- add
+    return_view: *AppView,      // <--- add
 ) !void {
-    // Esc: cancel command-line
     if (key.matches(vaxis.Key.escape, .{})) {
         list_cmd_active.* = false;
         list_cmd_new.* = false;
@@ -2346,7 +2484,6 @@ fn handleListCommandKey(
         return;
     }
 
-    // Backspace: clear any single-letter command
     if (key.matches(vaxis.Key.backspace, .{})) {
         list_cmd_new.* = false;
         list_cmd_done.* = false;
@@ -2354,18 +2491,66 @@ fn handleListCommandKey(
         return;
     }
 
-    // Enter: execute the command
     if (key.matches(vaxis.Key.enter, .{})) {
+        const src_view = view.*;
+
         if (list_cmd_new.*) {
-            // ":n" -> open editor for new TODO task
             editor.* = EditorState.init();
+            return_view.* = src_view; // <--- return where you came from
             view.* = .editor;
         } else if (list_cmd_done.*) {
-            // ":d" -> mark current TODO task as DONE
-            try markDone(ctx, allocator, ui);
-        } else if (list_cmd_edit.*){
-            try beginEditSelectedTask(ctx,ui,editor,view);
+            const focus: ListKind = if (src_view == .due_today) .todo else ui.focus;
+            const visible: []const usize =
+                if (src_view == .due_today) g_due_today.visible.items else visibleIndicesForFocus(focus);
+            const lv: *ListView =
+                if (src_view == .due_today) due_view else ui.activeView();
+
+            if (visible.len != 0) {
+                clampViewToVisible(lv, visible.len);
+                const sel_visible = lv.selected_index;
+                if (selectedOrigIndex(visible, lv)) |orig_idx| {
+                    try toggleDoneAtOrig(ctx, allocator, focus, orig_idx);
+
+                    // preserve row position post-rebuild
+                    const visible2: []const usize =
+                        if (src_view == .due_today) g_due_today.visible.items else visibleIndicesForFocus(focus);
+                    const vlen2 = visible2.len;
+                    if (vlen2 == 0) {
+                        lv.* = .{ .selected_index = 0, .scroll_offset = 0, .last_move = 0 };
+                    } else {
+                        lv.selected_index = if (sel_visible >= vlen2) (vlen2 - 1) else sel_visible;
+                        if (lv.scroll_offset >= vlen2) lv.scroll_offset = 0;
+                        lv.last_move = -1;
+                    }
+                }
+            }
+        } else if (list_cmd_edit.*) {
+            const src_focus: ListKind = if (src_view == .due_today) .todo else ui.focus;
+            const tasks_all: []const Task = switch (src_focus) {
+                .todo => ctx.index.todoSlice(),
+                .done => ctx.index.doneSlice(),
+            };
+            const visible: []const usize =
+                if (src_view == .due_today) g_due_today.visible.items else visibleIndicesForFocus(src_focus);
+            const lv: *ListView =
+                if (src_view == .due_today) due_view else ui.activeView();
+
+            if (visible.len != 0) {
+                clampViewToVisible(lv, visible.len);
+                if (selectedOrigIndex(visible, lv)) |orig_idx| {
+                    if (orig_idx < tasks_all.len) {
+                        var e = EditorState.fromTask(tasks_all[orig_idx]);
+                        e.editing_index = orig_idx;
+                        e.editing_status = if (src_focus == .done) store.Status.done else store.Status.todo;
+
+                        editor.* = e;
+                        return_view.* = src_view; // <--- return to list or due_today
+                        view.* = .editor;
+                    }
+                }
+            }
         }
+
         list_cmd_active.* = false;
         list_cmd_new.* = false;
         list_cmd_done.* = false;
@@ -2373,7 +2558,6 @@ fn handleListCommandKey(
         return;
     }
 
-    // For now we only support single-letter ":n" and ":d"
     if (key.matches('n', .{})) {
         list_cmd_new.* = true;
         list_cmd_done.* = false;
@@ -2386,7 +2570,7 @@ fn handleListCommandKey(
         list_cmd_edit.* = false;
         return;
     }
-    if (key.matches('e', .{})){
+    if (key.matches('e', .{})) {
         list_cmd_edit.* = true;
         list_cmd_new.* = false;
         list_cmd_done.* = false;
@@ -2746,6 +2930,7 @@ fn handleEditorKey(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
     ui: *UiState,
+    return_view: *AppView,
 ) !void {
     // If ":" command-line is active, all keys go there.
     if (editor.cmd_active) {
@@ -2768,7 +2953,7 @@ fn handleEditorKey(
             // :q -> exit editor without saving
             if (std.mem.eql(u8, cmd, "q")) {
                 editor.resetCommand();
-                view.* = .list;
+                view.* = return_view.*;
                 return;
             }
 
@@ -2776,7 +2961,7 @@ fn handleEditorKey(
             if (std.mem.eql(u8, cmd, "w") or std.mem.eql(u8, cmd, "wq")) {
                 try saveEditorToDisk(ctx, allocator, editor, ui);
                 editor.resetCommand();
-                view.* = .list;
+                view.* = return_view.*;
                 return;
             }
 
