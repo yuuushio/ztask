@@ -1200,28 +1200,20 @@ fn moveListViewSelection(view: *ListView, len: usize, delta: i32) void {
 }
 
 
-fn selectedOriginalIndexForActiveView(ui: *UiState) ?usize {
-    const focus = ui.focus;
-    const visible = visibleIndicesForFocus(focus);
-    if (visible.len == 0) return null;
 
-    var view = ui.activeView();
-    if (view.selected_index >= visible.len) view.selected_index = visible.len - 1;
-    return visible[view.selected_index];
+inline fn selectedOrigIndex(visible: []const usize, view: *const ListView) ?usize {
+    if (visible.len == 0) return null;
+    if (view.selected_index >= visible.len) return null;
+    return visible[view.selected_index]; // index into backing slice
 }
 
-fn clampActiveViewToVisible(ui: *UiState) void {
-    const focus = ui.focus;
-    var view = ui.activeView();
-    const vlen = visibleLenForFocus(focus);
-    if (vlen == 0) {
-        view.selected_index = 0;
-        view.scroll_offset = 0;
-        view.last_move = 0;
+inline fn clampViewToVisible(view: *ListView, visible_len: usize) void {
+    if (visible_len == 0) {
+        view.* = .{ .selected_index = 0, .scroll_offset = 0, .last_move = 0 };
         return;
     }
-    if (view.selected_index >= vlen) view.selected_index = vlen - 1;
-    if (view.scroll_offset >= vlen) view.scroll_offset = 0;
+    if (view.selected_index >= visible_len) view.selected_index = visible_len - 1;
+    if (view.scroll_offset >= visible_len) view.scroll_offset = 0;
 }
 
 fn toggleTodoOngoing(
@@ -1234,7 +1226,11 @@ fn toggleTodoOngoing(
     const todos = ctx.index.todoSlice();
     if (todos.len == 0) return;
 
-    const orig_idx = selectedOriginalIndexForActiveView(ui) orelse return;
+    const visible = visibleIndicesForFocus(.todo);
+    const view = ui.activeView();
+    clampViewToVisible(view, visible.len);
+
+    const orig_idx = selectedOrigIndex(visible, view) orelse return;
     if (orig_idx >= todos.len) return;
 
     const old = todos[orig_idx];
@@ -1243,35 +1239,38 @@ fn toggleTodoOngoing(
     updated.repeat_next_ms = 0;
 
     var todo_file = ctx.todo_file.*;
-    try store.rewriteJsonFileReplacingIndex(
-        allocator,
-        &todo_file,
-        todos,
-        orig_idx,
-        updated,
-    );
+    try store.rewriteJsonFileReplacingIndex(allocator, &todo_file, todos, orig_idx, updated);
 
     try ctx.index.reload(allocator, todo_file, ctx.done_file.*);
     try rebuildVisibleAll(allocator, ctx.index);
-    clampActiveViewToVisible(ui);
+
+    // Re-clamp after rebuild.
+    const visible2 = visibleIndicesForFocus(.todo);
+    clampViewToVisible(ui.activeView(), visible2.len);
 }
+
 
 fn toggleDoneTodo(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
     ui: *UiState,
 ) !void {
-    const sel_visible: usize = ui.activeView().selected_index;
+    const focus = ui.focus;
 
-    if (ui.focus == .todo) {
+    // Selection is always: (focus, visible list, view) -> orig index.
+    const visible = visibleIndicesForFocus(focus);
+    const view = ui.activeView();
+    clampViewToVisible(view, visible.len);
+
+    const sel_visible: usize = view.selected_index;
+    const orig_idx = selectedOrigIndex(visible, view) orelse return;
+
+    if (focus == .todo) {
         const todos = ctx.index.todoSlice();
         if (todos.len == 0) return;
-
-        const orig_idx = selectedOriginalIndexForActiveView(ui) orelse return;
         if (orig_idx >= todos.len) return;
 
         const original = todos[orig_idx];
-
         const orig_id = original.id;
         const orig_created = original.created_ms;
 
@@ -1296,35 +1295,16 @@ fn toggleDoneTodo(
         try ctx.index.reload(allocator, todo_file, done_file);
         try rebuildVisibleAll(allocator, ctx.index);
 
-        ui.focus = .todo;
-        var view = ui.activeView();
-        const vlen = visibleLenForFocus(.todo);
-        if (vlen == 0) {
-            view.selected_index = 0;
-            view.scroll_offset = 0;
-        } else if (sel_visible >= vlen) {
-            view.selected_index = vlen - 1;
-        } else {
-            view.selected_index = sel_visible;
-        }
-        view.last_move = -1;
-        return;
-    }
-
-    if (ui.focus == .done) {
+    } else if (focus == .done) {
         const dones = ctx.index.doneSlice();
         if (dones.len == 0) return;
-
-        const orig_idx = selectedOriginalIndexForActiveView(ui) orelse return;
         if (orig_idx >= dones.len) return;
 
         const original = dones[orig_idx];
         const orig_id = original.id;
         const orig_created = original.created_ms;
 
-
         var moved = original;
-
         moved.status = .todo;
         moved.repeat_next_ms = 0;
 
@@ -1340,20 +1320,23 @@ fn toggleDoneTodo(
         try ctx.index.reload(allocator, todo_file, done_file);
         try rebuildVisibleAll(allocator, ctx.index);
 
-        ui.focus = .done;
-        var view = ui.activeView();
-        const vlen = visibleLenForFocus(.done);
-        if (vlen == 0) {
-            view.selected_index = 0;
-            view.scroll_offset = 0;
-        } else if (sel_visible >= vlen) {
-            view.selected_index = vlen - 1;
-        } else {
-            view.selected_index = sel_visible;
-        }
-        view.last_move = -1;
+    } else {
         return;
     }
+
+    // Preserve current focus; keep selection on the same visible row if possible.
+    ui.focus = focus;
+    const view2 = ui.activeView();
+    const vlen = visibleLenForFocus(focus);
+
+    if (vlen == 0) {
+        view2.* = .{ .selected_index = 0, .scroll_offset = 0, .last_move = 0 };
+        return;
+    }
+
+    view2.selected_index = if (sel_visible >= vlen) (vlen - 1) else sel_visible;
+    if (view2.scroll_offset >= vlen) view2.scroll_offset = 0;
+    view2.last_move = -1;
 }
 
 
