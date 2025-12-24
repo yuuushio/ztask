@@ -1270,6 +1270,21 @@ inline fn clampViewToVisible(view: *ListView, visible_len: usize) void {
 }
 
 
+inline fn selectedOrigFromVisible(view: *ListView, visible: []const usize) ?usize {
+    clampViewToVisible(view, visible.len);
+    return selectedOrigIndex(visible, view);
+}
+
+inline fn keepRowAfterRebuild(view: *ListView, prev_sel: usize, new_len: usize) void {
+    if (new_len == 0) {
+        view.* = .{};
+        return;
+    }
+    view.selected_index = if (prev_sel >= new_len) (new_len - 1) else prev_sel;
+    if (view.scroll_offset >= new_len) view.scroll_offset = 0;
+}
+
+
 fn toggleTodoOngoingAtOrig(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
@@ -1359,32 +1374,15 @@ fn toggleTodoOngoing(
 ) !void {
     if (ui.focus != .todo) return;
 
-    const todos = ctx.index.todoSlice();
-    if (todos.len == 0) return;
-
-    const visible = visibleIndicesForFocus(.todo);
     const view = ui.activeView();
-    clampViewToVisible(view, visible.len);
+    const visible = visibleIndicesForFocus(.todo);
+    const prev_sel = view.selected_index;
 
-    const orig_idx = selectedOrigIndex(visible, view) orelse return;
-    if (orig_idx >= todos.len) return;
+    const orig_idx = selectedOrigFromVisible(view, visible) orelse return;
+    try toggleTodoOngoingAtOrig(ctx, allocator, orig_idx);
 
-    const old = todos[orig_idx];
-    var updated = old;
-    updated.status = if (old.status == .ongoing) .todo else .ongoing;
-    updated.repeat_next_ms = 0;
-
-    var todo_file = ctx.todo_file.*;
-    try store.rewriteJsonFileReplacingIndex(allocator, &todo_file, todos, orig_idx, updated);
-
-    try ctx.index.reload(allocator, todo_file, ctx.done_file.*);
-    try rebuildVisibleAll(allocator, ctx.index);
-
-    // Re-clamp after rebuild.
-    const visible2 = visibleIndicesForFocus(.todo);
-    clampViewToVisible(ui.activeView(), visible2.len);
+    keepRowAfterRebuild(view, prev_sel, visibleLenForFocus(.todo));
 }
-
 
 fn toggleDoneTodo(
     ctx: *TuiContext,
@@ -1393,85 +1391,17 @@ fn toggleDoneTodo(
 ) !void {
     const focus = ui.focus;
 
-    // Selection is always: (focus, visible list, view) -> orig index.
-    const visible = visibleIndicesForFocus(focus);
     const view = ui.activeView();
-    clampViewToVisible(view, visible.len);
+    const visible = visibleIndicesForFocus(focus);
+    const prev_sel = view.selected_index;
 
-    const sel_visible: usize = view.selected_index;
-    const orig_idx = selectedOrigIndex(visible, view) orelse return;
+    const orig_idx = selectedOrigFromVisible(view, visible) orelse return;
+    try toggleDoneAtOrig(ctx, allocator, focus, orig_idx);
 
-    if (focus == .todo) {
-        const todos = ctx.index.todoSlice();
-        if (todos.len == 0) return;
-        if (orig_idx >= todos.len) return;
-
-        const original = todos[orig_idx];
-        const orig_id = original.id;
-        const orig_created = original.created_ms;
-
-        var moved = original;
-        moved.status = .done;
-
-        moved.repeat_next_ms = 0;
-        if (moved.repeat.len != 0) {
-            const now_ms = std.time.milliTimestamp();
-            moved.repeat_next_ms = computeRepeatNextMs(moved.repeat, now_ms);
-        }
-
-        moved.id = orig_id;
-        moved.created_ms = orig_created;
-
-        var done_file = ctx.done_file.*;
-        try store.appendJsonTaskLine(allocator, &done_file, moved);
-
-        var todo_file = ctx.todo_file.*;
-        try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, todos, orig_idx);
-
-        try ctx.index.reload(allocator, todo_file, done_file);
-        try rebuildVisibleAll(allocator, ctx.index);
-
-    } else if (focus == .done) {
-        const dones = ctx.index.doneSlice();
-        if (dones.len == 0) return;
-        if (orig_idx >= dones.len) return;
-
-        const original = dones[orig_idx];
-        const orig_id = original.id;
-        const orig_created = original.created_ms;
-
-        var moved = original;
-        moved.status = .todo;
-        moved.repeat_next_ms = 0;
-
-        moved.id = orig_id;
-        moved.created_ms = orig_created;
-
-        var todo_file = ctx.todo_file.*;
-        try store.appendJsonTaskLine(allocator, &todo_file, moved);
-
-        var done_file = ctx.done_file.*;
-        try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, orig_idx);
-
-        try ctx.index.reload(allocator, todo_file, done_file);
-        try rebuildVisibleAll(allocator, ctx.index);
-
-    } else {
-        return;
-    }
-
-    // Preserve current focus; keep selection on the same visible row if possible.
+    // Focus preserved; selection repaired for the same list kind.
     ui.focus = focus;
     const view2 = ui.activeView();
-    const vlen = visibleLenForFocus(focus);
-
-    if (vlen == 0) {
-        view2.* = .{ .selected_index = 0, .scroll_offset = 0, .last_move = 0 };
-        return;
-    }
-
-    view2.selected_index = if (sel_visible >= vlen) (vlen - 1) else sel_visible;
-    if (view2.scroll_offset >= vlen) view2.scroll_offset = 0;
+    keepRowAfterRebuild(view2, prev_sel, visibleLenForFocus(focus));
     view2.last_move = -1;
 }
 
