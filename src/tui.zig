@@ -1299,6 +1299,36 @@ fn visibleDueToday(_: ListKind) []const usize {
 }
 
 
+
+fn deleteSelectedGeneric(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    ui: *UiState,
+    focus: ListKind,          // which backing file to delete from
+    view: *ListView,          // pane-local view (ui.activeView() or due_view, etc.)
+    visibleFn: VisibleFn,     // pane projection resolver
+) !void {
+    const visible_before = visibleFn(focus);
+    if (visible_before.len == 0) return;
+
+    clampViewToVisible(view, visible_before.len);
+
+    const prev_sel = view.selected_index;
+    const orig_idx = selectedOrigIndex(visible_before, view) orelse return;
+
+    try deleteAtOrig(ctx, allocator, focus, orig_idx);
+
+    // Re-clamp all canonical views defensively after reload/rebuild.
+    clampViewToVisible(&ui.todo, visibleLenForFocus(.todo));
+    clampViewToVisible(&ui.done, visibleLenForFocus(.done));
+
+    // Re-resolve the projection after rebuild and preserve row when possible.
+    const visible_after = visibleFn(focus);
+    keepRowAfterRebuild(view, prev_sel, visible_after.len);
+    view.last_move = -1;
+}
+
+
 inline fn selectedOrigIndex(visible: []const usize, view: *const ListView) ?usize {
     if (visible.len == 0) return null;
     if (view.selected_index >= visible.len) return null;
@@ -1320,9 +1350,11 @@ inline fn selectedOrigFromVisible(view: *ListView, visible: []const usize) ?usiz
     return selectedOrigIndex(visible, view);
 }
 
-inline fn keepRowAfterRebuild(view: *ListView, prev_sel: usize, new_len: usize) void {
+
+
+fn keepRowAfterRebuild(view: *ListView, prev_sel: usize, new_len: usize) void {
     if (new_len == 0) {
-        view.* = .{};
+        view.* = .{ .selected_index = 0, .scroll_offset = 0, .last_move = 0 };
         return;
     }
     view.selected_index = if (prev_sel >= new_len) (new_len - 1) else prev_sel;
