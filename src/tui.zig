@@ -30,6 +30,9 @@ const ListKind = ui_mod.ListKind;
 
 const ListView = ui_mod.ListView;
 
+
+const VisibleFn = *const fn (focus: ListKind) []const usize;
+
 const LIST_START_ROW: usize = 4;
 const STATUS_WIDTH: usize = 4;
 const CREATED_COLS: usize = 13;
@@ -1282,6 +1285,19 @@ fn deleteAtOrig(
     try ctx.index.reload(allocator, ctx.todo_file.*, done_file);
     try rebuildVisibleAll(allocator, ctx.index);
 }
+
+
+
+
+fn visibleMain(focus: ListKind) []const usize {
+    return visibleIndicesForFocus(focus);
+}
+
+// due_today is a projection over TODO originals; focus is ignored.
+fn visibleDueToday(_: ListKind) []const usize {
+    return g_due_today.visible.items;
+}
+
 
 inline fn selectedOrigIndex(visible: []const usize, view: *const ListView) ?usize {
     if (visible.len == 0) return null;
