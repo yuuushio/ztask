@@ -1254,6 +1254,35 @@ fn moveListViewSelection(view: *ListView, len: usize, delta: i32) void {
 
 
 
+fn deleteAtOrig(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    focus: ListKind,     // .todo deletes from todo file, .done deletes from done file
+    orig_idx: usize,
+) !void {
+    if (focus == .todo) {
+        const todos = ctx.index.todoSlice();
+        if (orig_idx >= todos.len) return;
+
+        var todo_file = ctx.todo_file.*;
+        try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, todos, orig_idx);
+
+        try ctx.index.reload(allocator, todo_file, ctx.done_file.*);
+        try rebuildVisibleAll(allocator, ctx.index);
+        return;
+    }
+
+    // focus == .done
+    const dones = ctx.index.doneSlice();
+    if (orig_idx >= dones.len) return;
+
+    var done_file = ctx.done_file.*;
+    try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, orig_idx);
+
+    try ctx.index.reload(allocator, ctx.todo_file.*, done_file);
+    try rebuildVisibleAll(allocator, ctx.index);
+}
+
 inline fn selectedOrigIndex(visible: []const usize, view: *const ListView) ?usize {
     if (visible.len == 0) return null;
     if (view.selected_index >= visible.len) return null;
