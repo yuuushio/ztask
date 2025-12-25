@@ -216,6 +216,14 @@ pub fn run(
                                 break :keypress;
                             }
 
+
+                            if (key.matches('D', .{})) {
+                                if (!g_projects_focus) {
+                                    try deleteSelectedGeneric(ctx, allocator, ui, ui.focus, ui.activeView(), visibleMain);
+                                }
+                                break :keypress;
+                            }
+
                             if (key.matches('d', .{}) and !g_projects_focus) {
                                 g_projects_focus = false;
                                 try g_due_today.refresh(allocator, ctx.index);
@@ -266,6 +274,12 @@ pub fn run(
 
                 if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
                     view = .list;
+                    break :keypress;
+                }
+
+                if (key.matches('D', .{})) {
+                    // due_today is always TODO-backed
+                    try deleteSelectedGeneric(ctx, allocator, ui, .todo, &due_view, visibleDueToday);
                     break :keypress;
                 }
 
