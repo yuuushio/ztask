@@ -3759,13 +3759,33 @@ fn computeProjectPanelWidth(
 }
 
 
-fn computeProjectsPaneWidth(term_width: usize) usize {
-    // If the terminal is too narrow, disable the sidebar entirely.
-    if (term_width < PROJECT_PANE_MIN_WIDTH + 8) return 0;
+fn computeProjectsPaneWidth(
+    term_width: usize,
+    index: *const TaskIndex,
+    focus: ListKind,
+) usize {
+    // No projects => no sidebar.
+    if (projectsForFocus(index, focus).len == 0) return 0;
 
-    const one_third = term_width / 3;
-    var w = if (one_third < PROJECT_PANE_MAX_WIDTH) one_third else PROJECT_PANE_MAX_WIDTH;
+    // Terminal too narrow => no sidebar.
+    if (term_width < PROJECT_PANEL_MIN_TERM_WIDTH) return 0;
+
+    const header_len: usize = "Projects".len;
+    const max_label: usize = switch (focus) {
+        .todo => index.projectsTodoMaxLabelLen(),
+        .done => index.projectsDoneMaxLabelLen(),
+    };
+    const label_w: usize = if (max_label > header_len) max_label else header_len;
+
+    // Layout invariant in drawProjectsPane:
+    //   separator at col (pane_width - 1)
+    //   gutter uses cols 0..1, text starts at col 2
+    //   => usable label cols = pane_width - 3
+    var w: usize = label_w + 3;
+
     if (w < PROJECT_PANE_MIN_WIDTH) w = PROJECT_PANE_MIN_WIDTH;
+    if (w > PROJECT_PANE_MAX_WIDTH) w = PROJECT_PANE_MAX_WIDTH;
+    if (term_width <= w + PROJECT_PANEL_MIN_LIST_WIDTH) return 0;
     return w;
 }
 
@@ -3775,7 +3795,7 @@ fn drawProjectsPane(win: vaxis.Window, index: *const TaskIndex, focus: ListKind)
     const term_height: usize = @intCast(win.height);
     if (term_height == 0 or term_width == 0) return;
 
-    const pane_width = computeProjectsPaneWidth(term_width);
+    const pane_width = computeProjectsPaneWidth(term_width, index, focus);
     if (pane_width == 0 or pane_width >= term_width) return;
 
     const right_col: usize = pane_width - 1;
@@ -3948,7 +3968,7 @@ fn drawTodoList(
         if (cmd_active and term_height > LIST_START_ROW + 1) 1 else 0;
 
 
-    const proj_pane_width = computeProjectsPaneWidth(term_width);
+    const proj_pane_width = computeProjectsPaneWidth(term_width, index, ui.focus);
 
     drawTaskListCore(
         win,

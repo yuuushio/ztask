@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const fs = std.fs;
+const math = std.math;
 const store = @import("task_store.zig");
 
 pub const Task = store.Task;
@@ -20,6 +21,21 @@ pub const ProjectEntry = struct {
     count_todo: usize,
     count_done: usize,
 };
+
+fn maxProjectLabelLen(entries: []const ProjectEntry) u16 {
+    if (entries.len == 0) return 0;
+
+    // Rendered labels in tui:
+    //   idx 0: "all"
+    //   idx >0: "+" ++ name
+    var max_len: usize = entries[0].name.len;
+    var i: usize = 1;
+    while (i < entries.len) : (i += 1) {
+        const n = entries[i].name.len + 1;
+        if (n > max_len) max_len = n;
+    }
+    return if (max_len > math.maxInt(u16)) math.maxInt(u16) else @intCast(max_len);
+}
 
 
 fn buildProjectsIndexForTasks(
@@ -88,6 +104,9 @@ pub const TaskIndex = struct {
     projects_todo: []ProjectEntry,
     projects_done: []ProjectEntry,
 
+    projects_todo_max_label: u16,
+    projects_done_max_label: u16,
+
     pub fn todoSlice(self: *const TaskIndex) []const Task {
         return self.todo_img.tasks;
     }
@@ -101,6 +120,13 @@ pub const TaskIndex = struct {
     }
     pub fn projectsDoneSlice(self: *const TaskIndex) []const ProjectEntry {
         return self.projects_done;
+    }
+
+    pub fn projectsTodoMaxLabelLen(self: *const TaskIndex) usize {
+        return self.projects_todo_max_label;
+    }
+    pub fn projectsDoneMaxLabelLen(self: *const TaskIndex) usize {
+        return self.projects_done_max_label;
     }
 
     pub fn load(
@@ -127,6 +153,9 @@ pub const TaskIndex = struct {
         const projects_done = try buildProjectsIndexForTasks(allocator, done_img.tasks);
         errdefer allocator.free(projects_done);
 
+        const todo_max = maxProjectLabelLen(projects_todo);
+        const done_max = maxProjectLabelLen(projects_done);
+
         return TaskIndex{
             .todo_img = todo_img,
             .done_img = done_img,
@@ -134,6 +163,8 @@ pub const TaskIndex = struct {
             .done = done_img.tasks,
             .projects_todo = projects_todo,
             .projects_done = projects_done,
+            .projects_todo_max_label = todo_max,
+            .projects_done_max_label = done_max,
         };
     }
 
@@ -164,12 +195,17 @@ pub const TaskIndex = struct {
         const projects_done = try buildProjectsIndexForTasks(allocator, done_img.tasks);
         errdefer allocator.free(projects_done);
 
+        const todo_max = maxProjectLabelLen(projects_todo);
+        const done_max = maxProjectLabelLen(projects_done);
+
         self.todo_img = todo_img;
         self.done_img = done_img;
         self.todo = todo_img.tasks;
         self.done = done_img.tasks;
         self.projects_todo = projects_todo;
         self.projects_done = projects_done;
+        self.projects_todo_max_label = todo_max;
+        self.projects_done_max_label = done_max;
     }
 
     pub fn deinit(self: *TaskIndex, allocator: mem.Allocator) void {
