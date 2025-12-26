@@ -21,17 +21,16 @@ const Task = task_mod.Task;
 
 const ProjectEntry = task_mod.ProjectEntry;
 
-
-
-
 const ui_mod = @import("ui_state.zig");
 const UiState = ui_mod.UiState;
 const ListKind = ui_mod.ListKind;
 
 const ListView = ui_mod.ListView;
 
-
 const VisibleFn = *const fn (focus: ListKind) []const usize;
+
+const undo_mod = @import("undo.zig");
+var g_undo: undo_mod.Undo = .{};
 
 const LIST_START_ROW: usize = 4;
 const STATUS_WIDTH: usize = 4;
@@ -130,6 +129,7 @@ pub fn run(
     defer g_visible_todo.deinit(allocator);
     defer g_visible_done.deinit(allocator);
     defer g_due_today.deinit(allocator);
+    defer g_undo.deinit(allocator);
 
     var view: AppView = .list;
     var return_view: AppView = .list;
@@ -231,6 +231,13 @@ pub fn run(
                                 break :keypress;
                             }
 
+                            if (key.matches('u', .{})) {
+                                try g_undo.toggle(allocator, ctx.index, ctx.todo_file, ctx.done_file);
+                                try rebuildVisibleAll(allocator, ctx.index);
+                                // clamp whichever view is active in that pane
+                                break :keypress;
+                            }
+
                             if (try handleListFocusKey(key, ui, ctx.index, allocator)) {
                                 break :keypress;
                             }
@@ -253,88 +260,95 @@ pub fn run(
                             break :keypress;
                         },
 
-            .due_today => {
-                if (list_cmd_active) {
-                    try handleListCommandKey(
-                        key, &view, &editor,
-                        &list_cmd_active, &list_cmd_new, &list_cmd_done, &list_cmd_edit,
-                        ctx, allocator, ui,
-                        &due_view, &return_view,
-                    );
-                    break :keypress;
-                }
+                        .due_today => {
+                            if (list_cmd_active) {
+                                try handleListCommandKey(
+                                    key, &view, &editor,
+                                    &list_cmd_active, &list_cmd_new, &list_cmd_done, &list_cmd_edit,
+                                    ctx, allocator, ui,
+                                    &due_view, &return_view,
+                                );
+                                break :keypress;
+                            }
 
-                if (key.matches(':', .{})) {
-                    list_cmd_active = true;
-                    list_cmd_new = false;
-                    list_cmd_done = false;
-                    list_cmd_edit = false;
-                    break :keypress;
-                }
+                            if (key.matches(':', .{})) {
+                                list_cmd_active = true;
+                                list_cmd_new = false;
+                                list_cmd_done = false;
+                                list_cmd_edit = false;
+                                break :keypress;
+                            }
 
-                if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
-                    view = .list;
-                    break :keypress;
-                }
+                            if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
+                                view = .list;
+                                break :keypress;
+                            }
 
-                if (key.matches('D', .{})) {
-                    // due_today is always TODO-backed
-                    try deleteSelectedGeneric(ctx, allocator, ui, .todo, &due_view, visibleDueToday);
-                    break :keypress;
-                }
+                            if (key.matches('D', .{})) {
+                                // due_today is always TODO-backed
+                                try deleteSelectedGeneric(ctx, allocator, ui, .todo, &due_view, visibleDueToday);
+                                break :keypress;
+                            }
 
-                try g_due_today.maybeRefresh(allocator, ctx.index);
+                            if (key.matches('u', .{})) {
+                                try g_undo.toggle(allocator, ctx.index, ctx.todo_file, ctx.done_file);
+                                try rebuildVisibleAll(allocator, ctx.index);
+                                // clamp whichever view is active in that pane
+                                break :keypress;
+                            }
 
-                const visible = g_due_today.visible.items;
-                const vlen = visible.len;
-                if (vlen == 0) break :keypress;
+                            try g_due_today.maybeRefresh(allocator, ctx.index);
 
-                clampViewToVisible(&due_view, vlen);
-                const sel_visible = due_view.selected_index;
-                const orig_idx = selectedOrigIndex(visible, &due_view) orelse break :keypress;
+                            const visible = g_due_today.visible.items;
+                            const vlen = visible.len;
+                            if (vlen == 0) break :keypress;
 
-                if (key.matches('@', .{})) {
-                    try toggleTodoOngoingAtOrig(ctx, allocator, orig_idx);
+                            clampViewToVisible(&due_view, vlen);
+                            const sel_visible = due_view.selected_index;
+                            const orig_idx = selectedOrigIndex(visible, &due_view) orelse break :keypress;
 
-                    const v2 = g_due_today.visible.items;
-                    const v2len = v2.len;
-                    if (v2len == 0) {
-                        due_view = .{};
-                    } else {
-                        due_view.selected_index = if (sel_visible >= v2len) (v2len - 1) else sel_visible;
-                        if (due_view.scroll_offset >= v2len) due_view.scroll_offset = 0;
-                        due_view.last_move = -1;
-                    }
-                    break :keypress;
-                }
+                            if (key.matches('@', .{})) {
+                                try toggleTodoOngoingAtOrig(ctx, allocator, orig_idx);
 
-                if (key.matches('X', .{})) {
-                    try toggleDoneAtOrig(ctx, allocator, .todo, orig_idx);
+                                const v2 = g_due_today.visible.items;
+                                const v2len = v2.len;
+                                if (v2len == 0) {
+                                    due_view = .{};
+                                } else {
+                                    due_view.selected_index = if (sel_visible >= v2len) (v2len - 1) else sel_visible;
+                                    if (due_view.scroll_offset >= v2len) due_view.scroll_offset = 0;
+                                    due_view.last_move = -1;
+                                }
+                                break :keypress;
+                            }
 
-                    const v2 = g_due_today.visible.items;
-                    const v2len = v2.len;
-                    if (v2len == 0) {
-                        due_view = .{};
-                    } else {
-                        due_view.selected_index = if (sel_visible >= v2len) (v2len - 1) else sel_visible;
-                        if (due_view.scroll_offset >= v2len) due_view.scroll_offset = 0;
-                        due_view.last_move = -1;
-                    }
-                    break :keypress;
-                }
+                            if (key.matches('X', .{})) {
+                                try toggleDoneAtOrig(ctx, allocator, .todo, orig_idx);
 
-                if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-                    moveListViewSelection(&due_view, vlen, 1);
-                    break :keypress;
-                }
+                                const v2 = g_due_today.visible.items;
+                                const v2len = v2.len;
+                                if (v2len == 0) {
+                                    due_view = .{};
+                                } else {
+                                    due_view.selected_index = if (sel_visible >= v2len) (v2len - 1) else sel_visible;
+                                    if (due_view.scroll_offset >= v2len) due_view.scroll_offset = 0;
+                                    due_view.last_move = -1;
+                                }
+                                break :keypress;
+                            }
 
-                if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-                    moveListViewSelection(&due_view, vlen, -1);
-                    break :keypress;
-                }
+                            if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+                                moveListViewSelection(&due_view, vlen, 1);
+                                break :keypress;
+                            }
 
-                break :keypress;
-            },
+                            if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+                                moveListViewSelection(&due_view, vlen, -1);
+                                break :keypress;
+                            }
+
+                            break :keypress;
+                        },
 
                         .editor => {
                             try handleEditorKey(key, &view, &editor, ctx, allocator, ui, &return_view);
