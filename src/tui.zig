@@ -1288,32 +1288,35 @@ fn moveListViewSelection(view: *ListView, len: usize, delta: i32) void {
 fn deleteAtOrig(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
-    focus: ListKind,     // .todo deletes from todo file, .done deletes from done file
+    focus: ListKind,
     orig_idx: usize,
 ) !void {
+    const tasks: []const Task = if (focus == .todo)
+        ctx.index.todoSlice()
+    else
+        ctx.index.doneSlice();
+
+    if (orig_idx >= tasks.len) return;
+
+    const victim = tasks[orig_idx];
+
+    // Undo must own the bytes inside victim, do not store slices into file image.
+    try g_undo.armDelete(allocator, focus, victim);
+    // If you want positional restore:
+    // try g_undo.armDeleteAt(allocator, focus, orig_idx, victim);
+
     if (focus == .todo) {
-        const todos = ctx.index.todoSlice();
-        if (orig_idx >= todos.len) return;
-
         var todo_file = ctx.todo_file.*;
-        try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, todos, orig_idx);
-
-        try ctx.index.reload(allocator, todo_file, ctx.done_file.*);
-        try rebuildVisibleAll(allocator, ctx.index);
-        return;
+        try store.rewriteJsonFileWithoutIndex(allocator, &todo_file, tasks, orig_idx);
+    } else {
+        var done_file = ctx.done_file.*;
+        try store.rewriteJsonFileWithoutIndex(allocator, &done_file, tasks, orig_idx);
     }
 
-    // focus == .done
-    const dones = ctx.index.doneSlice();
-    if (orig_idx >= dones.len) return;
-
-    var done_file = ctx.done_file.*;
-    try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, orig_idx);
-
-    try ctx.index.reload(allocator, ctx.todo_file.*, done_file);
+    // Reload both. The file handle identity is what matters.
+    try ctx.index.reload(allocator, ctx.todo_file.*, ctx.done_file.*);
     try rebuildVisibleAll(allocator, ctx.index);
 }
-
 
 
 
@@ -1403,6 +1406,8 @@ fn toggleTodoOngoingAtOrig(
     updated.status = if (old.status == .ongoing) .todo else .ongoing;
     updated.repeat_next_ms = 0;
 
+    try g_undo.armReplace(allocator, .todo, old, updated);
+
     var todo_file = ctx.todo_file.*;
     try store.rewriteJsonFileReplacingIndex(allocator, &todo_file, todos, orig_idx, updated);
 
@@ -1436,6 +1441,8 @@ fn toggleDoneAtOrig(
         moved.id = orig_id;
         moved.created_ms = orig_created;
 
+        try g_undo.armMove(allocator, .todo, .done, original, moved);
+
         var done_file = ctx.done_file.*;
         try store.appendJsonTaskLine(allocator, &done_file, moved);
 
@@ -1461,6 +1468,8 @@ fn toggleDoneAtOrig(
 
     moved.id = orig_id;
     moved.created_ms = orig_created;
+
+    try g_undo.armMove(allocator, .done, .todo, original, moved);
 
     var todo_file = ctx.todo_file.*;
     try store.appendJsonTaskLine(allocator, &todo_file, moved);
@@ -2654,17 +2663,12 @@ fn saveExistingTask(
     ui: *UiState,
 ) !void {
     const editing_status = editor.editing_status;
+    const focus: ListKind = if (editing_status == .done) .done else .todo;
 
     var file: fs.File = undefined;
     const tasks: []const Task = switch (editing_status) {
-        .done => blk: {
-            file = ctx.done_file.*;
-            break :blk ctx.index.doneSlice();
-        },
-        else => blk: {
-            file = ctx.todo_file.*;
-            break :blk ctx.index.todoSlice();
-        },
+        .done => blk: { file = ctx.done_file.*; break :blk ctx.index.doneSlice(); },
+        else  => blk: { file = ctx.todo_file.*; break :blk ctx.index.todoSlice(); },
     };
 
     if (tasks.len == 0) return;
@@ -2676,45 +2680,40 @@ fn saveExistingTask(
     var time_buf: [5]u8 = undefined;
     const due_info = canonicalDueFromEditor(editor, &date_buf, &time_buf);
 
-
     var repeat_buf: [16]u8 = undefined;
     const repeat_canon = canonicalRepeatFromEditor(editor, &repeat_buf);
-
 
     var repeat_next_ms: i64 = 0;
     if (repeat_canon.len != 0) {
         if (old.status == .done) {
-            // If repeat unchanged and we already had a timer, preserve it.
             if (old.repeat_next_ms != 0 and std.mem.eql(u8, repeat_canon, old.repeat)) {
                 repeat_next_ms = old.repeat_next_ms;
             } else {
                 const now_ms = std.time.milliTimestamp();
                 repeat_next_ms = computeRepeatNextMs(repeat_canon, now_ms);
             }
-        } else {
-            // TODO/other statuses: timer starts only when marked done.
-            repeat_next_ms = 0;
         }
-    } else {
-        // No repeat configured.
-        repeat_next_ms = 0;
     }
 
     const new_task: store.Task = .{
-        .id         = old.id,
-        .text       = editor.taskSlice(),
-        .proj_first = 0,
-        .proj_count = 0,
-        .ctx_first  = 0,
-        .ctx_count  = 0,
-        .priority   = editor.priorityValue(),
-        .status     = old.status,
-        .due_date   = due_info.date,
-        .due_time   = due_info.time,
-        .repeat     = repeat_canon,
+        .id            = old.id,
+        .text          = editor.taskSlice(),
+        .proj_first    = 0,
+        .proj_count    = 0,
+        .ctx_first     = 0,
+        .ctx_count     = 0,
+        .priority      = editor.priorityValue(),
+        .status        = old.status,
+        .due_date      = due_info.date,
+        .due_time      = due_info.time,
+        .repeat        = repeat_canon,
         .repeat_next_ms = repeat_next_ms,
-        .created_ms = old.created_ms,
+        .created_ms    = old.created_ms,
     };
+
+    // Arm undo with a deep copy of BOTH tasks.
+    // This must copy all slice fields out of old/new_task.
+    try g_undo.armReplace(allocator, focus, old, new_task);
 
     try store.rewriteJsonFileReplacingIndex(
         allocator,
@@ -2725,10 +2724,9 @@ fn saveExistingTask(
     );
 
     try ctx.index.reload(allocator, ctx.todo_file.*, ctx.done_file.*);
-
     try rebuildVisibleAll(allocator, ctx.index);
 
-    ui.focus = if (editing_status == .done) .done else .todo;
+    ui.focus = focus;
 
     var list_view = ui.activeView();
     const new_slice: []const Task = switch (ui.focus) {
@@ -2741,11 +2739,7 @@ fn saveExistingTask(
         list_view.scroll_offset = 0;
         list_view.last_move = 0;
     } else {
-        const idx = if (editor.editing_index < new_slice.len)
-            editor.editing_index
-        else
-            new_slice.len - 1;
-
+        const idx = if (editor.editing_index < new_slice.len) editor.editing_index else new_slice.len - 1;
         list_view.selected_index = idx;
         list_view.last_move = 0;
     }
@@ -2871,6 +2865,8 @@ fn saveNewTask(
         .repeat_next_ms = 0,
         .created_ms = now_ms,
     };
+
+    try g_undo.armAdd(allocator, .todo, new_task);
 
     var file = ctx.todo_file.*;
     try store.appendJsonTaskLine(allocator, &file, new_task);
