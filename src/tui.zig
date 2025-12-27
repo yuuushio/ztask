@@ -3723,42 +3723,6 @@ fn recomputeScrollOffsetForSelection(
 }
 
 
-fn computeProjectPanelWidth(
-    win: vaxis.Window,
-    index: *const TaskIndex,
-    focus:ListKind,
-) usize {
-
-    const projects = projectsForFocus(index,focus);
-    if (projects.len == 0) return 0;
-
-    const term_width: usize = @intCast(win.width);
-    if (term_width < PROJECT_PANEL_MIN_TERM_WIDTH) return 0;
-
-    // Longest project name.
-    var longest: usize = 0;
-    var i: usize = 0;
-    while (i < projects.len) : (i += 1) {
-        const name_len = projects[i].name.len;
-        if (name_len > longest) longest = name_len;
-    }
-
-    var width: usize = longest + 6; // "[n] " plus some slack
-    if (width < PROJECT_PANEL_MIN_WIDTH) width = PROJECT_PANEL_MIN_WIDTH;
-
-    const max_panel = @min(PROJECT_PANEL_MAX_WIDTH, term_width / 3);
-    if (width > max_panel) width = max_panel;
-
-    // Keep the main list from becoming absurdly narrow.
-    if (term_width <= width + PROJECT_PANEL_MIN_LIST_WIDTH) {
-        return 0;
-    }
-
-
-    return width;
-}
-
-
 fn computeProjectsPaneWidth(
     term_width: usize,
     index: *const TaskIndex,
@@ -3780,8 +3744,9 @@ fn computeProjectsPaneWidth(
     // Layout invariant in drawProjectsPane:
     //   separator at col (pane_width - 1)
     //   gutter uses cols 0..1, text starts at col 2
-    //   => usable label cols = pane_width - 3
-    var w: usize = label_w + 3;
+    //   reserve 1 padding col before the separator
+    //   => usable label cols = pane_width - 4
+    var w: usize = label_w + 4;
 
     if (w < PROJECT_PANE_MIN_WIDTH) w = PROJECT_PANE_MIN_WIDTH;
     if (w > PROJECT_PANE_MAX_WIDTH) w = PROJECT_PANE_MAX_WIDTH;
