@@ -642,6 +642,60 @@ fn parseRepeatUnit(unit_raw: []const u8) ?u8 {
     return null;
 }
 
+fn processRepeats(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+) !void {
+    while (true) {
+        const dones = ctx.index.doneSlice();
+        if (dones.len == 0) return;
+
+        const now_ms = std.time.milliTimestamp();
+
+        var found = false;
+        var move_index: usize = 0;
+        var move_task: Task = undefined;
+
+        var i: usize = 0;
+        while (i < dones.len) : (i += 1) {
+            const t = dones[i];
+            if (t.repeat.len == 0) continue;
+            if (t.repeat_next_ms <= 0) continue;
+            if (t.repeat_next_ms > now_ms) continue;
+
+            found = true;
+            move_index = i;
+            move_task = t;
+            break;
+        }
+
+        if (!found) break;
+
+        var todo_file = ctx.todo_file.*;
+        var done_file = ctx.done_file.*;
+
+        const orig_id = move_task.id;
+        const orig_created = move_task.created_ms;
+
+        var resurrect = move_task;
+
+        resurrect.status = .todo;
+        resurrect.repeat_next_ms = 0; // timer only re-armed on next completion
+        //
+        resurrect.id = orig_id;
+        resurrect.created_ms = orig_created;
+
+        try store.appendJsonTaskLine(allocator, &todo_file, resurrect);
+        try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, move_index);
+
+        try ctx.index.reload(allocator, todo_file, done_file);
+
+        try rebuildVisibleAll(allocator, ctx.index);
+
+        // UI indices are clamped lazily in drawTodoList via activeView().
+    }
+}
+
 /// Parse a user repeat string into canonical "<N><u>" (e.g. "2d").
 /// Returns null on invalid input.
 fn parseRepeatCanonical(input: []const u8, buf: *[16]u8) ?[]const u8 {
@@ -814,6 +868,12 @@ const EditorState = struct {
     cmd_buf: [32]u8 = undefined,
     cmd_len: usize = 0,
 
+    // feedback upon invalid input
+    toast_buf: [96]u8 = undefined,
+    toast_len: usize = 0,
+    toast_until_ms: i64 = 0,
+
+
     pub fn initNew() EditorState {
         return .{
             .mode = .insert,
@@ -852,6 +912,23 @@ const EditorState = struct {
     // keep the old name for callers that still use .init()
     pub fn init() EditorState {
         return EditorState.initNew();
+    }
+
+    pub fn toastClear(self: *EditorState) void {
+        self.toast_len = 0;
+        self.toast_until_ms = 0;
+    }
+
+    pub fn toastError(self: *EditorState, msg: []const u8) void {
+        // ASCII-only, truncate, no allocation.
+        const n = if (msg.len < self.toast_buf.len) msg.len else self.toast_buf.len;
+        @memcpy(self.toast_buf[0..n], msg[0..n]);
+        self.toast_len = n;
+        self.toast_until_ms = std.time.milliTimestamp() + 2500;
+    }
+
+    pub fn toastSlice(self: *const EditorState) []const u8 {
+        return self.toast_buf[0..self.toast_len];
     }
 
     /// Build an editor pre-filled from an existing task.
@@ -1801,6 +1878,58 @@ fn drawListCommandLine(
             .char = .{ .grapheme = slice, .width = 1 },
             .style = style,
         });
+    }
+}
+
+
+fn drawToastLine(win: vaxis.Window, msg: []const u8) void {
+    if (win.height == 0) return;
+    const row: u16 = win.height - 1;
+
+    // Red foreground. Adjust to whatever your vaxis version expects.
+    var style: vaxis.Style = .{};
+    style.fg = .{ .index = 1 }; // if your palette index 1 is red
+    // If you use RGB:
+    // style.fg = .{ .rgb = .{ .r = 255, .g = 64, .b = 64 } };
+
+    // Clear the row quickly.
+    var x: u16 = 0;
+    while (x < win.width) : (x += 1) {
+        _ = win.writeCell(x, row, .{
+            .char = .{ .grapheme = " "[0..1], .width = 1 },
+            .style = .{},
+        });
+    }
+
+    // Write message, truncated to width.
+    const max = @as(usize, win.width);
+    const n = if (msg.len < max) msg.len else max;
+
+    x = 0;
+    while (x < n) : (x += 1) {
+        const slice = graphemeFromByte(msg[@intCast(x)]);
+        _ = win.writeCell(x, row, .{
+            .char = .{ .grapheme = slice, .width = 1 },
+            .style = style,
+        });
+    }
+}
+
+fn drawEditorFooter(win: vaxis.Window, editor: *EditorState, new_flag: bool, done_flag: bool, edit_flag: bool) void {
+    if (win.height == 0) return;
+
+    const now_ms = std.time.milliTimestamp();
+    if (editor.toast_len != 0 and now_ms >= editor.toast_until_ms) {
+        editor.toastClear();
+    }
+
+    if (editor.cmd_active) {
+        drawListCommandLine(win, true, new_flag, done_flag, edit_flag);
+        return;
+    }
+
+    if (editor.toast_len != 0) {
+        drawToastLine(win, editor.toastSlice());
     }
 }
 
@@ -2883,59 +3012,6 @@ fn saveNewTask(
 }
 
 
-fn processRepeats(
-    ctx: *TuiContext,
-    allocator: std.mem.Allocator,
-) !void {
-    while (true) {
-        const dones = ctx.index.doneSlice();
-        if (dones.len == 0) return;
-
-        const now_ms = std.time.milliTimestamp();
-
-        var found = false;
-        var move_index: usize = 0;
-        var move_task: Task = undefined;
-
-        var i: usize = 0;
-        while (i < dones.len) : (i += 1) {
-            const t = dones[i];
-            if (t.repeat.len == 0) continue;
-            if (t.repeat_next_ms <= 0) continue;
-            if (t.repeat_next_ms > now_ms) continue;
-
-            found = true;
-            move_index = i;
-            move_task = t;
-            break;
-        }
-
-        if (!found) break;
-
-        var todo_file = ctx.todo_file.*;
-        var done_file = ctx.done_file.*;
-
-        const orig_id = move_task.id;
-        const orig_created = move_task.created_ms;
-
-        var resurrect = move_task;
-
-        resurrect.status = .todo;
-        resurrect.repeat_next_ms = 0; // timer only re-armed on next completion
-        //
-        resurrect.id = orig_id;
-        resurrect.created_ms = orig_created;
-
-        try store.appendJsonTaskLine(allocator, &todo_file, resurrect);
-        try store.rewriteJsonFileWithoutIndex(allocator, &done_file, dones, move_index);
-
-        try ctx.index.reload(allocator, todo_file, done_file);
-
-        try rebuildVisibleAll(allocator, ctx.index);
-
-        // UI indices are clamped lazily in drawTodoList via activeView().
-    }
-}
 
 
 fn keyToAscii(key: vaxis.Key) ?u8 {
