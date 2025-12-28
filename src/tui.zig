@@ -21,6 +21,8 @@ const Task = task_mod.Task;
 
 const ProjectEntry = task_mod.ProjectEntry;
 
+
+
 const ui_mod = @import("ui_state.zig");
 const UiState = ui_mod.UiState;
 const ListKind = ui_mod.ListKind;
@@ -31,6 +33,9 @@ const VisibleFn = *const fn (focus: ListKind) []const usize;
 
 const undo_mod = @import("undo.zig");
 var g_undo: undo_mod.Undo = .{};
+
+
+const Tri = enum { empty, ok, invalid };
 
 const LIST_START_ROW: usize = 4;
 const STATUS_WIDTH: usize = 4;
@@ -872,6 +877,7 @@ const EditorState = struct {
     toast_buf: [96]u8 = undefined,
     toast_len: usize = 0,
     toast_until_ms: i64 = 0,
+    toast_is_error: bool = false,
 
 
     pub fn initNew() EditorState {
@@ -917,19 +923,35 @@ const EditorState = struct {
     pub fn toastClear(self: *EditorState) void {
         self.toast_len = 0;
         self.toast_until_ms = 0;
+        self.toast_is_error = false;
     }
 
-    pub fn toastError(self: *EditorState, msg: []const u8) void {
-        // ASCII-only, truncate, no allocation.
-        const n = if (msg.len < self.toast_buf.len) msg.len else self.toast_buf.len;
-        @memcpy(self.toast_buf[0..n], msg[0..n]);
-        self.toast_len = n;
-        self.toast_until_ms = std.time.milliTimestamp() + 2500;
+    pub fn toastActive(self: *const EditorState, now_ms: i64) bool {
+        return self.toast_len != 0 and now_ms < self.toast_until_ms;
     }
 
     pub fn toastSlice(self: *const EditorState) []const u8 {
         return self.toast_buf[0..self.toast_len];
     }
+
+    pub fn toastError(self: *EditorState, msg: []const u8) void {
+        var n: usize = msg.len;
+        if (n > self.toast_buf.len) n = self.toast_buf.len;
+        @memcpy(self.toast_buf[0..n], msg[0..n]);
+        self.toast_len = @intCast(n);
+        self.toast_is_error = true;
+        self.toast_until_ms = std.time.milliTimestamp() + 2500;
+    }
+
+    pub fn toastInfo(self: *EditorState, msg: []const u8) void {
+        var n: usize = msg.len;
+        if (n > self.toast_buf.len) n = self.toast_buf.len;
+        @memcpy(self.toast_buf[0..n], msg[0..n]);
+        self.toast_len = @intCast(n);
+        self.toast_is_error = false;
+        self.toast_until_ms = std.time.milliTimestamp() + 2000;
+    }
+
 
     /// Build an editor pre-filled from an existing task.
     pub fn fromTask(task: store.Task) EditorState {
@@ -1844,6 +1866,36 @@ fn drawCounts(win: vaxis.Window, index: *const TaskIndex, ui: *const UiState) vo
 }
 
 
+
+fn isAsciiSpace(b: u8) bool { return b == ' ' or b == '\t'; }
+
+fn trimAsciiSpacesLocal(s: []const u8) []const u8 {
+    var a: usize = 0;
+    var b: usize = s.len;
+    while (a < b and isAsciiSpace(s[a])) : (a += 1) {}
+    while (b > a and isAsciiSpace(s[b - 1])) : (b -= 1) {}
+    return s[a..b];
+}
+
+fn triDueDate(raw: []const u8, out: *[10]u8) Tri {
+    const s = trimAsciiSpacesLocal(raw);
+    if (s.len == 0) return .empty;
+    return if (dt.parseUserDueDateCanonical(s, out)) .ok else .invalid;
+}
+
+fn triDueTime(raw: []const u8, out: *[5]u8) Tri {
+    const s = trimAsciiSpacesLocal(raw);
+    if (s.len == 0) return .empty;
+    return if (dt.parseUserDueTimeCanonical(s, out)) .ok else .invalid;
+}
+
+fn triRepeat(raw: []const u8, buf: *[16]u8) Tri {
+    const s = trimAsciiSpacesLocal(raw);
+    if (s.len == 0) return .empty;
+    return if (parseRepeatCanonical(s, buf) != null) .ok else .invalid;
+}
+
+
 fn drawListCommandLine(
     win: vaxis.Window,
     active: bool,
@@ -2457,6 +2509,8 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
     const term_height: usize = @intCast(win.height);
     if (term_width == 0 or term_height == 0) return;
 
+    const now_ms: i64 = std.time.milliTimestamp();
+
     const header = "NEW TASK";
     const mode_insert = "[INSERT]";
     const mode_normal = "[NORMAL]";
@@ -2546,14 +2600,31 @@ fn drawEditorView(win: vaxis.Window, editor: *const EditorState) void {
         drawEditorMeta(win, meta_top, editor);
     }
 
-    // hints at bottom row (only when not in ":" command mode)
-    if (term_height > 6 and !editor.cmd_active) {
+
+    // bottom-row feedback: toast dominates; otherwise hints.
+    if (term_height > 0) {
         const hint = "i: insert   :w save+quit   :q quit   :p/:d/:r/:t focus meta fields";
-        const hint_row: u16 = @intCast(term_height - 1);
-        const hint_style: vaxis.Style = .{
-            .fg = .{ .rgb = .{ 150, 150, 150 } },
-        };
-        drawCenteredText(win, hint_row, hint, hint_style);
+
+        if (editor.toastActive(now_ms)) {
+            // If ":" command-line is active, keep the last row for ":" input.
+            const row_u: u16 = if (editor.cmd_active) blk: {
+                if (term_height < 2) break :blk 0;
+                break :blk @intCast(term_height - 2);
+            } else @intCast(term_height - 1);
+
+            const toast_style: vaxis.Style = if (editor.toast_is_error)
+                .{ .fg = .{ .rgb = .{ 255, 80, 80 } }, .bold = true }
+            else
+                .{ .fg = .{ .rgb = .{ 180, 180, 180 } } };
+
+            drawCenteredText(win, row_u, editor.toastSlice(), toast_style);
+        } else if (term_height > 6 and !editor.cmd_active) {
+            const hint_row: u16 = @intCast(term_height - 1);
+            const hint_style: vaxis.Style = .{
+                .fg = .{ .rgb = .{ 150, 150, 150 } },
+            };
+            drawCenteredText(win, hint_row, hint, hint_style);
+        }
     }
 
     // editor ":" command-line at the bottom when active
@@ -2785,12 +2856,26 @@ fn beginEditSelectedTask(
 }
 
 
+fn saveEditorToDisk(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    editor: *EditorState,
+    ui: *UiState,
+) !bool {
+    if (editor.is_new) {
+        return try saveNewTask(ctx, allocator, editor, ui);
+    } else {
+        return try saveExistingTask(ctx, allocator, editor, ui);
+    }
+}
+
+
 fn saveExistingTask(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
     editor: *EditorState,
     ui: *UiState,
-) !void {
+) !bool {
     const editing_status = editor.editing_status;
     const focus: ListKind = if (editing_status == .done) .done else .todo;
 
@@ -2800,26 +2885,29 @@ fn saveExistingTask(
         else  => blk: { file = ctx.todo_file.*; break :blk ctx.index.todoSlice(); },
     };
 
-    if (tasks.len == 0) return;
-    if (editor.editing_index >= tasks.len) return;
+    if (tasks.len == 0 or editor.editing_index >= tasks.len) {
+        editor.toastError("stale edit target");
+        return false;
+    }
 
     const old = tasks[editor.editing_index];
 
     var date_buf: [10]u8 = undefined;
     var time_buf: [5]u8 = undefined;
-    const due_info = canonicalDueFromEditor(editor, &date_buf, &time_buf);
 
     var repeat_buf: [16]u8 = undefined;
-    const repeat_canon = canonicalRepeatFromEditor(editor, &repeat_buf);
+
+    const v = validateEditorFields(editor, &date_buf, &time_buf, &repeat_buf);
+    if (!v.ok) return false;
 
     var repeat_next_ms: i64 = 0;
-    if (repeat_canon.len != 0) {
+    if (v.repeat.len != 0) {
         if (old.status == .done) {
-            if (old.repeat_next_ms != 0 and std.mem.eql(u8, repeat_canon, old.repeat)) {
+            if (old.repeat_next_ms != 0 and std.mem.eql(u8, v.repeat, old.repeat)) {
                 repeat_next_ms = old.repeat_next_ms;
             } else {
                 const now_ms = std.time.milliTimestamp();
-                repeat_next_ms = computeRepeatNextMs(repeat_canon, now_ms);
+                repeat_next_ms = computeRepeatNextMs(v.repeat, now_ms);
             }
         }
     }
@@ -2833,9 +2921,9 @@ fn saveExistingTask(
         .ctx_count     = 0,
         .priority      = editor.priorityValue(),
         .status        = old.status,
-        .due_date      = due_info.date,
-        .due_time      = due_info.time,
-        .repeat        = repeat_canon,
+        .due_date      = v.due_date,
+        .due_time      = v.due_time,
+        .repeat        = v.repeat,
         .repeat_next_ms = repeat_next_ms,
         .created_ms    = old.created_ms,
     };
@@ -2872,20 +2960,139 @@ fn saveExistingTask(
         list_view.selected_index = idx;
         list_view.last_move = 0;
     }
+
+    return true;
 }
 
-fn saveEditorToDisk(
+
+fn validateEditorFields(
+    editor: *EditorState,
+    date_buf: *[10]u8,
+    time_buf: *[5]u8,
+    repeat_buf: *[16]u8,
+) struct {
+    ok: bool,
+    due_date: []const u8,
+    due_time: []const u8,
+    repeat: []const u8,
+} {
+    const raw_date = trimAsciiSpacesLocal(editor.dueSlice());
+    const raw_time = trimAsciiSpacesLocal(editor.timeSlice());
+    const raw_repeat = trimAsciiSpacesLocal(editor.repeatSlice());
+
+    var due_date: []const u8 = &[_]u8{};
+    var due_time: []const u8 = &[_]u8{};
+    var repeat: []const u8 = &[_]u8{};
+
+    var d: Tri = .empty;
+    if (raw_date.len != 0) {
+        d = if (dt.parseUserDueDateCanonical(raw_date, date_buf)) .ok else .invalid;
+    }
+
+    if (d == .invalid) {
+        editor.toastError("invalid due date (use YYYY-MM-DD or D/M/YY)");
+        return .{ .ok = false, .due_date = due_date, .due_time = due_time, .repeat = repeat };
+    }
+
+    // Due time tri-state; time requires date.
+    var t: Tri = .empty;
+    if (raw_time.len != 0) {
+        t = if (dt.parseUserDueTimeCanonical(raw_time, time_buf)) .ok else .invalid;
+    }
+    if (d == .empty and t != .empty) {
+        editor.toastError("due time requires a valid due date");
+        return .{ .ok = false, .due_date = due_date, .due_time = due_time, .repeat = repeat };
+    }
+
+    if (d == .ok) {
+        due_date = date_buf[0..];
+        if (t == .invalid) {
+            editor.toastError("invalid due time (use HH:MM, HHMM, or 1pm)");
+            return .{ .ok = false, .due_date = due_date, .due_time = due_time, .repeat = repeat };
+        }
+        if (t == .ok) due_time = time_buf[0..];
+    }
+
+    // Repeat tri-state: empty clears; invalid refuses.
+    if (raw_repeat.len != 0) {
+        if (parseRepeatCanonical(raw_repeat, repeat_buf)) |canon| {
+            repeat = canon;
+        } else {
+            editor.toastError("invalid repeat (examples: 2d, 3 weeks, 1h)");
+            return .{ .ok = false, .due_date = due_date, .due_time = due_time, .repeat = repeat };
+        }
+    }
+
+    return .{ .ok = true, .due_date = due_date, .due_time = due_time, .repeat = repeat };
+}
+
+
+fn saveNewTask(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
     editor: *EditorState,
     ui: *UiState,
-) !void {
-    if (editor.is_new) {
-        try saveNewTask(ctx, allocator, editor, ui);
-    } else {
-        try saveExistingTask(ctx, allocator, editor, ui);
+) !bool {
+    const text = editor.taskSlice();
+    if (text.len == 0) {
+        editor.toastError("empty task text");
+        return false;
     }
+
+    var date_buf: [10]u8 = undefined;
+    var time_buf: [5]u8 = undefined;
+
+    var repeat_buf: [16]u8 = undefined;
+    const v = validateEditorFields(editor, &date_buf, &time_buf, &repeat_buf);
+    if (!v.ok) return false;
+
+    const prio_val: u8 = editor.priorityValue();
+
+    var max_id: u64 = 0;
+    for (ctx.index.todoSlice()) |t| {
+        if (t.id > max_id) max_id = t.id;
+    }
+    for (ctx.index.doneSlice()) |t| {
+        if (t.id > max_id) max_id = t.id;
+    }
+
+    const new_id: u64 = max_id + 1;
+    const now_ms: i64 = std.time.milliTimestamp();
+
+    const new_task: store.Task = .{
+        .id         = new_id,
+        .text       = text,
+        .proj_first = 0,
+        .proj_count = 0,
+        .ctx_first  = 0,
+        .ctx_count  = 0,
+        .priority   = prio_val,
+        .status     = .todo,
+        .due_date   = v.due_date,
+        .due_time   = v.due_time,
+        .repeat     = v.repeat,
+        .repeat_next_ms = 0,
+        .created_ms = now_ms,
+    };
+
+    try g_undo.armAdd(allocator, .todo, new_task);
+
+    var file = ctx.todo_file.*;
+    try store.appendJsonTaskLine(allocator, &file, new_task);
+    try ctx.index.reload(allocator, file, ctx.done_file.*);
+
+    try rebuildVisibleAll(allocator, ctx.index);
+
+    if (ctx.index.todoSlice().len != 0) {
+        ui.focus = .todo;
+        var todo_view = &ui.todo;
+        todo_view.selected_index = ctx.index.todoSlice().len - 1;
+        todo_view.last_move = 1;
+    }
+
+    return true;
 }
+
 
 fn markDone(
     ctx: *TuiContext,
@@ -2950,68 +3157,6 @@ fn markDone(
     todo_view.last_move = -1;
 }
 
-fn saveNewTask(
-    ctx: *TuiContext,
-    allocator: std.mem.Allocator,
-    editor: *EditorState,
-    ui: *UiState,
-) !void {
-    const text = editor.taskSlice();
-    if (text.len == 0) return;
-
-    var date_buf: [10]u8 = undefined;
-    var time_buf: [5]u8 = undefined;
-    const due_info = canonicalDueFromEditor(editor, &date_buf, &time_buf);
-
-    var repeat_buf: [16]u8 = undefined;
-    const repeat_canon = canonicalRepeatFromEditor(editor, &repeat_buf);
-
-    const prio_val: u8 = editor.priorityValue();
-
-    var max_id: u64 = 0;
-    for (ctx.index.todoSlice()) |t| {
-        if (t.id > max_id) max_id = t.id;
-    }
-    for (ctx.index.doneSlice()) |t| {
-        if (t.id > max_id) max_id = t.id;
-    }
-
-    const new_id: u64 = max_id + 1;
-    const now_ms: i64 = std.time.milliTimestamp();
-
-    const new_task: store.Task = .{
-        .id         = new_id,
-        .text       = text,
-        .proj_first = 0,
-        .proj_count = 0,
-        .ctx_first  = 0,
-        .ctx_count  = 0,
-        .priority   = prio_val,
-        .status     = .todo,
-        .due_date   = due_info.date,
-        .due_time   = due_info.time,
-        .repeat     = repeat_canon,
-        .repeat_next_ms = 0,
-        .created_ms = now_ms,
-    };
-
-    try g_undo.armAdd(allocator, .todo, new_task);
-
-    var file = ctx.todo_file.*;
-    try store.appendJsonTaskLine(allocator, &file, new_task);
-    try ctx.index.reload(allocator, file, ctx.done_file.*);
-
-    try rebuildVisibleAll(allocator, ctx.index);
-
-    if (ctx.index.todoSlice().len != 0) {
-        ui.focus = .todo;
-        var todo_view = &ui.todo;
-        todo_view.selected_index = ctx.index.todoSlice().len - 1;
-        todo_view.last_move = 1;
-    }
-}
-
-
 
 
 fn keyToAscii(key: vaxis.Key) ?u8 {
@@ -3066,9 +3211,16 @@ fn handleEditorKey(
 
             // :w or :wq -> save and exit
             if (std.mem.eql(u8, cmd, "w") or std.mem.eql(u8, cmd, "wq")) {
-                try saveEditorToDisk(ctx, allocator, editor, ui);
+                const ok = try saveEditorToDisk(ctx, allocator, editor, ui);
                 editor.resetCommand();
-                view.* = return_view.*;
+
+                if (ok) {
+                    view.* = return_view.*;
+                } else {
+                    // Stay in editor, command-line closes, toast is visible.
+                    editor.cmd_active = false;
+                    editor.mode = .normal;
+                }
                 return;
             }
 
