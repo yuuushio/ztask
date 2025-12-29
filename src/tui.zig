@@ -2319,23 +2319,17 @@ fn drawMetaFieldBox(
     label_field_width: u16,
     label: []const u8,
     value: []const u8,
-    cursor_pos: usize,
+    cursor_pos_raw: usize,
     focused: bool,
 ) void {
     if (top + 2 >= win.height) return;
     if (label_field_width + 3 >= win.width) return;
 
     const base_style: vaxis.Style = .{};
-    const label_focus_style: vaxis.Style = .{
-        .bold = true,
-    };
-    const cursor_style: vaxis.Style = .{
-        .bold = true,
-        .reverse = true,
-    };
+    const label_focus_style: vaxis.Style = .{ .bold = true };
+    const cursor_style: vaxis.Style = .{ .bold = true, .reverse = true };
 
     const label_style = if (focused) label_focus_style else base_style;
-
     const mid_row: u16 = top + 1;
 
     // draw "label:" left box like you already do
@@ -2357,8 +2351,6 @@ fn drawMetaFieldBox(
         });
         col += 1;
     }
-
-    // space before box
     if (col < win.width and col < label_field_width) {
         const sp = " "[0..1];
         _ = win.writeCell(col, mid_row, .{
@@ -2368,15 +2360,16 @@ fn drawMetaFieldBox(
         col += 1;
     }
 
-
-    const min_inner: usize = 8;
-    var inner_w: usize = value.len;
-    if (inner_w < min_inner) inner_w = min_inner;
-
     const available: usize = @intCast(win.width - label_field_width);
     if (available <= 3) return;
 
-    const max_inner: usize = available - 2;
+    const min_inner: usize = 8;
+    const max_inner: usize = available - 2; // leave room for borders
+
+    // Reserve one interior cell so cursor_pos==value.len is drawable.
+    // Also tolerate cursor_pos drift by clamping later.
+    var inner_w: usize = value.len + 1;
+    if (inner_w < min_inner) inner_w = min_inner;
     if (inner_w > max_inner) inner_w = max_inner;
 
     const total_w: u16 = @intCast(inner_w + 2);
@@ -2387,30 +2380,22 @@ fn drawMetaFieldBox(
 
     drawRect(win, label_field_width, top, box_right, box_bottom, base_style);
 
-    // contents
-    var val_col: u16 = label_field_width + 1;
-    const val_row: u16 = mid_row;
+    // Clamp cursor into interior range [0 .. inner_w-1]
+    const cursor_pos: usize = if (cursor_pos_raw < inner_w) cursor_pos_raw else (inner_w - 1);
 
-    i = 0;
-    while (i < value.len and val_col < box_right) : (i += 1) {
-        const g = value[i .. i + 1];
-        const style_for_cell =
-            if (focused and cursor_pos == i) cursor_style else base_style;
+    // Draw full interior width (clears stale glyphs), and apply cursor style at cursor_pos.
+    const inner_left: u16 = label_field_width + 1;
+    var x: u16 = inner_left;
+    var j: usize = 0;
+    while (j < inner_w and x < box_right) : (j += 1) {
+        const g: []const u8 = if (j < value.len) value[j .. j + 1] else " "[0..1];
+        const st: vaxis.Style = if (focused and cursor_pos == j) cursor_style else base_style;
 
-        _ = win.writeCell(val_col, val_row, .{
+        _ = win.writeCell(x, mid_row, .{
             .char = .{ .grapheme = g, .width = 1 },
-            .style = style_for_cell,
+            .style = st,
         });
-        val_col += 1;
-    }
-
-    // cursor at end of value -> highlight trailing space
-    if (focused and cursor_pos == value.len and val_col < box_right) {
-        const space = " "[0..1];
-        _ = win.writeCell(val_col, val_row, .{
-            .char = .{ .grapheme = space, .width = 1 },
-            .style = cursor_style,
-        });
+        x += 1;
     }
 }
 
