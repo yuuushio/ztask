@@ -8,6 +8,25 @@ pub const Task = store.Task;
 pub const Status = store.Status;
 pub const FileImage = store.FileImage;
 
+pub const TextSpanKind = enum(u8) {
+    project,
+    context,
+};
+
+/// Byte-span into Task.text.
+pub const TextSpan = packed struct {
+    start: u32, // inclusive byte index
+    end:   u32, // exclusive byte index
+    kind:  TextSpanKind,
+};
+
+/// Span range for one task, referencing into a pool slice.
+pub const TextSpanRef = packed struct {
+    first: u32,
+    count: u16,
+};
+
+
 const ProjectAgg = struct {
     count_todo: usize,
     count_done: usize,
@@ -35,6 +54,120 @@ fn maxProjectLabelLen(entries: []const ProjectEntry) u16 {
         if (n > max_len) max_len = n;
     }
     return if (max_len > math.maxInt(u16)) math.maxInt(u16) else @intCast(max_len);
+}
+
+fn sortSpansByStart(spans: []TextSpan) void {
+    // Insertion sort. Span counts are tiny; O(n^2) stays trivial and allocation-free.
+    var i: usize = 1;
+    while (i < spans.len) : (i += 1) {
+        const key = spans[i];
+        var j: usize = i;
+        while (j > 0 and spans[j - 1].start > key.start) : (j -= 1) {
+            spans[j] = spans[j - 1];
+        }
+        spans[j] = key;
+    }
+}
+
+const SpanIndex = struct {
+    refs: []TextSpanRef,
+    pool: []TextSpan,
+};
+
+fn buildSpanIndexForTasks(
+    allocator: mem.Allocator,
+    tasks: []const store.Task,
+) !SpanIndex {
+    const refs = try allocator.alloc(TextSpanRef, tasks.len);
+    errdefer allocator.free(refs);
+
+    var pool_list: std.ArrayListUnmanaged(TextSpan) = .{};
+    errdefer pool_list.deinit(allocator);
+
+    // Heuristic: most tasks have 0–4 tags worth styling.
+    try pool_list.ensureTotalCapacity(allocator, tasks.len * 4);
+
+    var ti: usize = 0;
+    while (ti < tasks.len) : (ti += 1) {
+        const t = tasks[ti];
+
+        const first_u32: u32 = @intCast(pool_list.items.len);
+        var count_u16: u16 = 0;
+
+        // +projects
+        {
+            var tags: [16][]const u8 = undefined;
+            var n: usize = 0;
+            store.collectTags(t.text, '+', &tags, &n);
+
+            var k: usize = 0;
+            while (k < n) : (k += 1) {
+                const name = tags[k];
+                if (name.len == 0) continue;
+
+                const off_usize: usize =
+                    @intFromPtr(name.ptr) - @intFromPtr(t.text.ptr);
+                if (off_usize == 0) continue;
+                if (t.text[off_usize - 1] != '+') continue;
+
+                const start_usize = off_usize - 1;
+                const end_usize = off_usize + name.len;
+
+                // u32 range is ample for a task line.
+                try pool_list.append(allocator, .{
+                    .start = @intCast(start_usize),
+                    .end   = @intCast(end_usize),
+                    .kind  = .project,
+                });
+                if (count_u16 != std.math.maxInt(u16)) count_u16 += 1;
+            }
+        }
+
+        // #contexts
+        {
+            var tags: [16][]const u8 = undefined;
+            var n: usize = 0;
+            store.collectTags(t.text, '#', &tags, &n);
+
+            var k: usize = 0;
+            while (k < n) : (k += 1) {
+                const name = tags[k];
+                if (name.len == 0) continue;
+
+                const off_usize: usize =
+                    @intFromPtr(name.ptr) - @intFromPtr(t.text.ptr);
+                if (off_usize == 0) continue;
+                if (t.text[off_usize - 1] != '#') continue;
+
+                const start_usize = off_usize - 1;
+                const end_usize = off_usize + name.len;
+
+                try pool_list.append(allocator, .{
+                    .start = @intCast(start_usize),
+                    .end   = @intCast(end_usize),
+                    .kind  = .context,
+                });
+                if (count_u16 != std.math.maxInt(u16)) count_u16 += 1;
+            }
+        }
+
+        // Ensure sorted spans for monotone scan in the renderer.
+        const span_count: usize = @intCast(count_u16);
+        if (span_count > 1) {
+            const first = @as(usize, @intCast(first_u32));
+            sortSpansByStart(pool_list.items[first .. first + span_count]);
+        }
+
+        refs[ti] = .{
+            .first = first_u32,
+            .count = count_u16,
+        };
+    }
+
+    const pool = try pool_list.toOwnedSlice(allocator);
+    errdefer allocator.free(pool);
+
+    return .{ .refs = refs, .pool = pool };
 }
 
 
@@ -107,6 +240,13 @@ pub const TaskIndex = struct {
     projects_todo_max_label: u16,
     projects_done_max_label: u16,
 
+    // Precomputed styling spans for Task.text, keyed by task ordinal.
+    todo_span_refs: []TextSpanRef,
+    done_span_refs: []TextSpanRef,
+    todo_span_pool: []TextSpan,
+    done_span_pool: []TextSpan,
+ 
+
     pub fn todoSlice(self: *const TaskIndex) []const Task {
         return self.todo_img.tasks;
     }
@@ -127,6 +267,19 @@ pub const TaskIndex = struct {
     }
     pub fn projectsDoneMaxLabelLen(self: *const TaskIndex) usize {
         return self.projects_done_max_label;
+    }
+
+    pub fn todoSpanRefs(self: *const TaskIndex) []const TextSpanRef {
+        return self.todo_span_refs;
+    }
+    pub fn doneSpanRefs(self: *const TaskIndex) []const TextSpanRef {
+        return self.done_span_refs;
+    }
+    pub fn todoSpanPool(self: *const TaskIndex) []const TextSpan {
+        return self.todo_span_pool;
+    }
+    pub fn doneSpanPool(self: *const TaskIndex) []const TextSpan {
+        return self.done_span_pool;
     }
 
     pub fn load(
@@ -153,6 +306,18 @@ pub const TaskIndex = struct {
         const projects_done = try buildProjectsIndexForTasks(allocator, done_img.tasks);
         errdefer allocator.free(projects_done);
 
+        const todo_spans = try buildSpanIndexForTasks(allocator, todo_img.tasks);
+        errdefer {
+            allocator.free(todo_spans.refs);
+            allocator.free(todo_spans.pool);
+        }
+
+        const done_spans = try buildSpanIndexForTasks(allocator, done_img.tasks);
+        errdefer {
+            allocator.free(done_spans.refs);
+            allocator.free(done_spans.pool);
+        }
+
         const todo_max = maxProjectLabelLen(projects_todo);
         const done_max = maxProjectLabelLen(projects_done);
 
@@ -165,6 +330,10 @@ pub const TaskIndex = struct {
             .projects_done = projects_done,
             .projects_todo_max_label = todo_max,
             .projects_done_max_label = done_max,
+            .todo_span_refs = todo_spans.refs,
+            .done_span_refs = done_spans.refs,
+            .todo_span_pool = todo_spans.pool,
+            .done_span_pool = done_spans.pool,
         };
     }
 
@@ -177,6 +346,12 @@ pub const TaskIndex = struct {
         // free old project lists first
         allocator.free(self.projects_todo);
         allocator.free(self.projects_done);
+
+        // free old span indices
+        allocator.free(self.todo_span_refs);
+        allocator.free(self.done_span_refs);
+        allocator.free(self.todo_span_pool);
+        allocator.free(self.done_span_pool);
 
         // free old images
         self.todo_img.deinit(allocator);
@@ -198,6 +373,18 @@ pub const TaskIndex = struct {
         const todo_max = maxProjectLabelLen(projects_todo);
         const done_max = maxProjectLabelLen(projects_done);
 
+        const todo_spans = try buildSpanIndexForTasks(allocator, todo_img.tasks);
+        errdefer {
+            allocator.free(todo_spans.refs);
+            allocator.free(todo_spans.pool);
+        }
+
+        const done_spans = try buildSpanIndexForTasks(allocator, done_img.tasks);
+        errdefer {
+            allocator.free(done_spans.refs);
+            allocator.free(done_spans.pool);
+        }
+
         self.todo_img = todo_img;
         self.done_img = done_img;
         self.todo = todo_img.tasks;
@@ -211,6 +398,10 @@ pub const TaskIndex = struct {
     pub fn deinit(self: *TaskIndex, allocator: mem.Allocator) void {
         allocator.free(self.projects_todo);
         allocator.free(self.projects_done);
+        allocator.free(self.todo_span_refs);
+        allocator.free(self.done_span_refs);
+        allocator.free(self.todo_span_pool);
+        allocator.free(self.done_span_pool);
         self.todo_img.deinit(allocator);
         self.done_img.deinit(allocator);
         self.* = undefined;
