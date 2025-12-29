@@ -6,6 +6,7 @@ const math = std.math;
 const dt = @import("due_datetime.zig");
 
 const due_today_mod = @import("due_today.zig");
+const task_index = @import("task_index.zig");
 
 const Cell = vaxis.Cell;
 
@@ -1212,6 +1213,8 @@ fn drawDueTodayList(win: vaxis.Window, index: *const TaskIndex, due_view: *ListV
         todos,
         visible,
         due_view,
+        index.todoSpanRefs(),
+        index.todoSpanPool(),
         list_start,
         reserved_rows,
         0,
@@ -1224,6 +1227,8 @@ fn drawTaskListCore(
     tasks_all: []const Task,
     visible: []const usize,
     view: *ListView,
+    span_refs: []const task_index.TextSpanRef,
+    span_pool: []const task_index.TextSpan,
     list_start_row: usize,
     reserved_rows: usize,
     proj_pane_width: usize,
@@ -1268,10 +1273,22 @@ fn drawTaskListCore(
     const space_slice = " "[0..1];
 
     const base_style: vaxis.Style = .{};
-    const sel_style: vaxis.Style = .{
-        .bold = true,
-        .fg = .{ .index = 7 },
+    // const sel_style: vaxis.Style = .{
+    //     .bold = true,
+    //     .fg = .{ .index = 7 },
+    // };
+    // Distinct token hues; selection adds boldness without annihilating fg.
+    const base_styles: LineStyleSet = .{
+        .normal  = base_style,
+        .project = .{ .fg = .{ .rgb = .{ 120, 200, 255 } } },
+        .context = .{ .fg = .{ .rgb = .{ 170, 235, 170 } } },
+        .due     = .{ .fg = .{ .rgb = .{ 220, 190, 140 } } },
     };
+    var sel_styles: LineStyleSet = base_styles;
+    sel_styles.normal.bold = true;
+    sel_styles.project.bold = true;
+    sel_styles.context.bold = true;
+    sel_styles.due.bold = true;
 
     var row: usize = list_start_row;
     var remaining_rows: usize = viewport_height;
@@ -1288,7 +1305,19 @@ fn drawTaskListCore(
         const task = tasks_all[orig];
 
         const selected = (view.selected_index == vi);
-        const style = if (selected) sel_style else base_style;
+
+        const styles_ptr: *const LineStyleSet = if (selected) &sel_styles else &base_styles;
+
+        if (orig >= span_refs.len) {
+            // If this triggers, your span index fell out of sync with the task slices.
+            break;
+        }
+        const ref = span_refs[orig];
+        const first: usize = @intCast(ref.first);
+        const count: usize = @intCast(ref.count);
+
+        if (first + count > span_pool.len) break;
+        const spans = span_pool[first .. first + count];
 
         var layout = computeLayout(task, content_width);
         if (layout.rows == 0) layout.rows = 1;
@@ -1300,14 +1329,14 @@ fn drawTaskListCore(
             const g = if (selected and !suppress_indicator) indicator_slice else space_slice;
             _ = win.writeCell(arrow_col, row_u16, .{
                 .char = .{ .grapheme = g, .width = 1 },
-                .style = style,
+                .style = styles_ptr.normal,
             });
         }
 
         if (pad_col < win.width) {
             _ = win.writeCell(pad_col, row_u16, .{
                 .char = .{ .grapheme = space_slice, .width = 1 },
-                .style = style,
+                .style = styles_ptr.normal,
             });
         }
 
@@ -1322,7 +1351,7 @@ fn drawTaskListCore(
         while (s_i < status_text.len and col_status < win.width) : (s_i += 1) {
             _ = win.writeCell(col_status, row_u16, .{
                 .char = .{ .grapheme = status_text[s_i .. s_i + 1], .width = 1 },
-                .style = style,
+                .style = styles_ptr.normal,
             });
             col_status += 1;
         }
@@ -1330,7 +1359,7 @@ fn drawTaskListCore(
         if (col_status < win.width) {
             _ = win.writeCell(col_status, row_u16, .{
                 .char = .{ .grapheme = space_slice, .width = 1 },
-                .style = style,
+                .style = styles_ptr.normal,
             });
             col_status += 1;
         }
@@ -1342,7 +1371,7 @@ fn drawTaskListCore(
                 row_u16,
                 col_status,
                 task.priority,
-                style,
+                styles_ptr.normal,
             );
         }
 
@@ -1351,11 +1380,12 @@ fn drawTaskListCore(
             drawWrappedTask(
                 win,
                 task,
+                spans,
                 row,
                 @intCast(text_start_col),
                 layout.rows,
                 text_width,
-                style,
+                styles_ptr,
             );
         }
 
@@ -3629,6 +3659,20 @@ fn drawWrappedText(
     }
 }
 
+const LineStyleSet = struct {
+    normal:  vaxis.Style,
+    project: vaxis.Style,
+    context: vaxis.Style,
+    due:     vaxis.Style,
+};
+
+inline fn styleForSpanKind(styles: *const LineStyleSet, kind: task_index.TextSpanKind) vaxis.Style {
+    return switch (kind) {
+        .project => styles.project,
+        .context => styles.context,
+    };
+}
+
 
 /// Draw `<task.text>` optionally followed by ` d:[YYYY-MM-DD HH:MM]`,
 /// wrapped into `max_rows` rows and `max_cols` columns, starting at
@@ -3636,11 +3680,12 @@ fn drawWrappedText(
 fn drawWrappedTask(
     win: vaxis.Window,
     task: Task,
+    spans: []const task_index.TextSpan,
     start_row: usize,
     col_offset: usize,
     max_rows: usize,
     max_cols: usize,
-    style: vaxis.Style,
+    styles: *const LineStyleSet,
 ) void {
     if (max_rows == 0 or max_cols == 0) return;
 
@@ -3655,6 +3700,7 @@ fn drawWrappedTask(
 
     var i: usize = 0;
     var row_index: usize = 0;
+    var span_i: usize = 0;
 
     while (i < total_len and row_index < max_rows and (start_row + row_index) < height) : (row_index += 1) {
         const row: u16 = @intCast(start_row + row_index);
@@ -3695,9 +3741,24 @@ fn drawWrappedTask(
             const b = twoPartByte(main, suffix, j);
             const g = graphemeFromByte(b);
 
+            // Select style by span for main text; suffix uses dedicated due style.
+            var cell_style: vaxis.Style = undefined;
+            if (j < main.len) {
+                // Advance span cursor monotonically.
+                while (span_i < spans.len and j >= spans[span_i].end) : (span_i += 1) {}
+
+                if (span_i < spans.len and j >= spans[span_i].start and j < spans[span_i].end) {
+                    cell_style = styleForSpanKind(styles, spans[span_i].kind);
+                } else {
+                    cell_style = styles.normal;
+                }
+            } else {
+                cell_style = styles.due;
+            }
+
             const cell: Cell = .{
                 .char = .{ .grapheme = g, .width = 1 },
-                .style = style,
+                .style = cell_style,
             };
             _ = win.writeCell(@intCast(col), row, cell);
             col += 1;
@@ -3710,6 +3771,7 @@ fn drawWrappedTask(
         }
     }
 }
+
 
 
 /// Logical width of the "P{prio}" prefix in columns.
@@ -4128,6 +4190,15 @@ fn drawTodoList(
         .done => index.doneSlice(),
     };
 
+    const span_refs: []const task_index.TextSpanRef = switch (ui.focus) {
+        .todo => index.todoSpanRefs(),
+        .done => index.doneSpanRefs(),
+    };
+    const span_pool: []const task_index.TextSpan = switch (ui.focus) {
+        .todo => index.todoSpanPool(),
+        .done => index.doneSpanPool(),
+    };
+
     const visible: []const usize = visibleIndicesForFocus(ui.focus);
     var view = ui.activeView();
 
@@ -4153,6 +4224,8 @@ fn drawTodoList(
         tasks_all,
         visible,
         view,
+        span_refs,
+        span_pool,
         LIST_START_ROW,
         reserved_rows,
         proj_pane_width,
