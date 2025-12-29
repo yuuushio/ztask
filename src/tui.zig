@@ -1280,9 +1280,9 @@ fn drawTaskListCore(
     // Distinct token hues; selection adds boldness without annihilating fg.
     const base_styles: LineStyleSet = .{
         .normal  = base_style,
-        .project = .{ .fg = .{ .rgb = .{ 120, 200, 255 } } },
-        .context = .{ .fg = .{ .rgb = .{ 170, 235, 170 } } },
-        .due     = .{ .fg = .{ .rgb = .{ 220, 190, 140 } } },
+        .project = .{ .fg = .{ .index = 2 } },
+        .context = .{ .fg = .{ .index = 12 } },
+        .due     = .{ .fg = .{ .index = 13 } },
     };
     var sel_styles: LineStyleSet = base_styles;
     sel_styles.normal.bold = true;
