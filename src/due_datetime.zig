@@ -1,4 +1,6 @@
 const std = @import("std");
+const mem = std.mem;
+const fs = std.fs;
 
 fn isAsciiSpace(b: u8) bool {
     return b == ' ' or b == '\t';
@@ -296,3 +298,98 @@ pub fn parseUserDueTimeCanonical(input: []const u8, out: *[5]u8) bool {
 
     return true;
 }
+
+/// ------------------------------
+/// Due rendering config + formatter
+/// ------------------------------
+
+pub const DueFormatConfig = struct {
+    date: CompiledFormat,
+    time: CompiledFormat,
+    tmpl: CompiledTemplate,
+
+    pub fn deinit(self: *DueFormatConfig, allocator: mem.Allocator) void {
+        self.date.deinit(allocator);
+        self.time.deinit(allocator);
+        self.tmpl.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub fn loadDueFormatConfigFromFile(
+    allocator: mem.Allocator,
+    file: fs.File,
+) !DueFormatConfig {
+    // Defaults (duplicated into owned buffers so deinit stays trivial).
+    var date_raw: []const u8 = "%x";
+    var time_raw: []const u8 = "%H:%M";
+    var tmpl_raw: []const u8 = "date time";
+
+    // Read config file once.
+    try file.seekTo(0);
+    const st = try file.stat();
+
+    // If empty, seed a tiny commented template (discoverable, not noisy).
+    if (st.size == 0) {
+        const seed =
+            "# ztask.conf\n" ++
+            "# due_date = \"%d/%m/%Y\"\n" ++
+            "# due_time = \"%-I:%M %p\"\n" ++
+            "# due      = \"date at time\"  # also supports {date} and {time}\n";
+        _ = try file.write(seed);
+        // Keep defaults.
+    } else {
+        // Cap size to keep latency bounded.
+        if (st.size > 16 * 1024) return error.ConfigTooLarge;
+
+        var buf = try allocator.alloc(u8, @intCast(st.size));
+        defer allocator.free(buf);
+
+        try file.seekTo(0);
+        const n = try file.readAll(buf);
+        const src = buf[0..n];
+
+        // Parse key = value, ASCII, line-based.
+        var it = mem.splitScalar(u8, src, '\n');
+        while (it.next()) |line_raw| {
+            var line = trimAscii(line_raw);
+            if (line.len == 0) continue;
+            if (line[0] == '#' or line[0] == ';') continue;
+
+            // strip inline comments starting at '#' or ';' (not inside quotes).
+            line = stripInlineComment(line);
+
+            const eqi = mem.indexOfScalar(u8, line, '=') orelse continue;
+            var key = trimAscii(line[0..eqi]);
+            var val = trimAscii(line[eqi + 1 ..]);
+
+            if (key.len == 0) continue;
+            if (val.len == 0) continue;
+
+            val = unquoteAscii(val);
+
+            // normalize key to lower without allocating
+            if (eqLower(key, "due_date")) {
+                date_raw = val;
+            } else if (eqLower(key, "due_time")) {
+                time_raw = val;
+            } else if (eqLower(key, "due")) {
+                tmpl_raw = val;
+            }
+        }
+    }
+
+    // Compile formats (tokenize once).
+    var date_fmt = try CompiledFormat.init(allocator, date_raw);
+    errdefer date_fmt.deinit(allocator);
+
+    var time_fmt = try CompiledFormat.init(allocator, time_raw);
+    errdefer time_fmt.deinit(allocator);
+
+    var tmpl = try CompiledTemplate.init(allocator, tmpl_raw);
+    errdefer tmpl.deinit(allocator);
+
+    return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
+}
+
+
