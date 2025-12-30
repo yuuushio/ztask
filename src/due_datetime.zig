@@ -392,4 +392,167 @@ pub fn loadDueFormatConfigFromFile(
     return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
 }
 
+/// Formats the due payload inside `d:[...]`.
+/// If date is empty -> returns empty.
+/// If time is empty -> date only.
+/// If time exists -> applies template with date/time substitutions.
+pub fn formatDueForSuffix(
+    cfg: *const DueFormatConfig,
+    due_date_canon: []const u8,
+    due_time_canon: []const u8,
+    out: []u8,
+) []const u8 {
+    if (due_date_canon.len == 0 or out.len == 0) return out[0..0];
 
+    var y: u32 = 0;
+    var m: u32 = 0;
+    var d: u32 = 0;
+
+    if (!parseCanonDate(due_date_canon, &y, &m, &d)) {
+        // If storage is corrupted, degrade gracefully.
+        const n = @min(out.len, due_date_canon.len);
+        mem.copyForwards(u8, out[0..n], due_date_canon[0..n]);
+        return out[0..n];
+    }
+
+    // Precompute formatted date.
+    var date_buf: [64]u8 = undefined;
+    const date_s = cfg.date.formatDate(y, m, d, date_buf[0..]);
+
+    if (due_time_canon.len == 0) {
+        const n = @min(out.len, date_s.len);
+        mem.copyForwards(u8, out[0..n], date_s[0..n]);
+        return out[0..n];
+    }
+
+    var hh: u32 = 0;
+    var mm_: u32 = 0;
+    if (!parseCanonTime(due_time_canon, &hh, &mm_)) {
+        // Time malformed; date only.
+        const n = @min(out.len, date_s.len);
+        mem.copyForwards(u8, out[0..n], date_s[0..n]);
+        return out[0..n];
+    }
+
+    var time_buf: [32]u8 = undefined;
+    const time_s = cfg.time.formatTime(hh, mm_, time_buf[0..]);
+
+    return cfg.tmpl.render(date_s, time_s, out);
+}
+
+/// ------------------------------
+/// Internal: template compiler
+/// ------------------------------
+
+const TemplateTokKind = enum(u8) { lit, date, time };
+
+const TemplateTok = packed struct {
+    kind: TemplateTokKind,
+    off:  u16,
+    len:  u16,
+};
+
+const CompiledTemplate = struct {
+    raw:   []u8,
+    toks:  []TemplateTok,
+
+    pub fn init(allocator: mem.Allocator, src: []const u8) !CompiledTemplate {
+        // Always own raw to keep lifetime trivial.
+        var raw = try allocator.dupe(u8, src);
+        errdefer allocator.free(raw);
+
+        var list: std.ArrayListUnmanaged(TemplateTok) = .{};
+        errdefer list.deinit(allocator);
+
+        // Tokenize: supports {date}/{time} and bare whole-word "date"/"time".
+        var i: usize = 0;
+        var lit_start: usize = 0;
+
+        while (i < raw.len) {
+            // Curly placeholders.
+            if (raw[i] == '{') {
+                if (matchLit(raw, i, "{date}")) {
+                    try appendLitTok(allocator, &list, lit_start, i);
+                    try list.append(allocator, .{ .kind = .date, .off = 0, .len = 0 });
+                    i += "{date}".len;
+                    lit_start = i;
+                    continue;
+                }
+                if (matchLit(raw, i, "{time}")) {
+                    try appendLitTok(allocator, &list, lit_start, i);
+                    try list.append(allocator, .{ .kind = .time, .off = 0, .len = 0 });
+                    i += "{time}".len;
+                    lit_start = i;
+                    continue;
+                }
+            }
+
+            // Bare whole-word placeholders (to honor your example: "date at time").
+            if (matchWord(raw, i, "date")) {
+                try appendLitTok(allocator, &list, lit_start, i);
+                try list.append(allocator, .{ .kind = .date, .off = 0, .len = 0 });
+                i += "date".len;
+                lit_start = i;
+                continue;
+            }
+            if (matchWord(raw, i, "time")) {
+                try appendLitTok(allocator, &list, lit_start, i);
+                try list.append(allocator, .{ .kind = .time, .off = 0, .len = 0 });
+                i += "time".len;
+                lit_start = i;
+                continue;
+            }
+
+            i += 1;
+        }
+
+        try appendLitTok(allocator, &list, lit_start, raw.len);
+
+        const toks = try list.toOwnedSlice(allocator);
+        errdefer allocator.free(toks);
+
+        return .{ .raw = raw, .toks = toks };
+    }
+
+    pub fn deinit(self: *CompiledTemplate, allocator: mem.Allocator) void {
+        allocator.free(self.raw);
+        allocator.free(self.toks);
+        self.* = undefined;
+    }
+
+    pub fn render(
+        self: *const CompiledTemplate,
+        date_s: []const u8,
+        time_s: []const u8,
+        out: []u8,
+    ) []const u8 {
+        var pos: usize = 0;
+
+        var ti: usize = 0;
+        while (ti < self.toks.len and pos < out.len) : (ti += 1) {
+            const t = self.toks[ti];
+            switch (t.kind) {
+                .lit => {
+                    const off: usize = t.off;
+                    const len: usize = t.len;
+                    if (len == 0) continue;
+                    const n = @min(out.len - pos, len);
+                    mem.copyForwards(u8, out[pos .. pos + n], self.raw[off .. off + n]);
+                    pos += n;
+                },
+                .date => {
+                    const n = @min(out.len - pos, date_s.len);
+                    mem.copyForwards(u8, out[pos .. pos + n], date_s[0..n]);
+                    pos += n;
+                },
+                .time => {
+                    const n = @min(out.len - pos, time_s.len);
+                    mem.copyForwards(u8, out[pos .. pos + n], time_s[0..n]);
+                    pos += n;
+                },
+            }
+        }
+
+        return out[0..pos];
+    }
+};
