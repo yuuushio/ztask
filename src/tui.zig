@@ -5,6 +5,8 @@ const math = std.math;
 
 const dt = @import("due_datetime.zig");
 
+var g_due_cfg: *const dt.DueFormatConfig = undefined;
+
 const due_today_mod = @import("due_today.zig");
 const task_index = @import("task_index.zig");
 
@@ -96,6 +98,7 @@ pub const TuiContext = struct {
     todo_file: *fs.File,
     done_file: *fs.File,
     index: *TaskIndex,
+    due_cfg: *const dt.DueFormatConfig,
 };
 
 const AppView = enum {
@@ -136,6 +139,8 @@ pub fn run(
     defer g_visible_done.deinit(allocator);
     defer g_due_today.deinit(allocator);
     defer g_undo.deinit(allocator);
+    g_due_cfg = ctx.due_cfg;
+    
 
     var view: AppView = .list;
     var return_view: AppView = .list;
@@ -3450,94 +3455,22 @@ fn measureWrappedRows(text: []const u8, max_cols: usize) usize {
 ///   - If the combined meta string would exceed `buf.len`, this returns
 ///     an empty slice instead of risking overflow.
 fn buildMetaSuffixForTask(task: Task, buf: []u8) []const u8 {
-    const date = task.due_date;
-    const time = task.due_time;
-    const repeat = task.repeat;
+    if (task.due_date.len == 0) return &[_]u8{};
 
-    const have_date = (date.len != 0);
-    const have_repeat = (repeat.len != 0);
-    if (!have_date and !have_repeat) return buf[0..0];
-
-    const has_time = (time.len != 0 and have_date);
-
-    // Leading space only when task text exists.
-    const space_before_meta: usize =
-        if (task.text.len != 0) 1 else 0;
-
-    const due_size: usize = if (have_date) blk: {
-        var n: usize = 0;
-        // "d:["
-        n += 3;
-        // date
-        n += date.len;
-        if (has_time) {
-            // " " + time
-            n += 1 + time.len;
-        }
-        // "]"
-        n += 1;
-        break :blk n;
-    } else 0;
-
-    const repeat_size: usize = if (have_repeat)
-        (3 + repeat.len + 1) // "r:[" + repeat + "]"
-    else
-        0;
-
-    const space_between_meta: usize =
-        if (have_date and have_repeat) 1 else 0;
-
-    const total_needed: usize =
-        space_before_meta + due_size + repeat_size + space_between_meta;
-
-    if (total_needed > buf.len) {
-        // Fail closed: no meta rendered instead of risking overflow.
-        return buf[0..0];
-    }
+    // " d:[" + payload + "]"
+    if (buf.len < 6) return &[_]u8{};
 
     var pos: usize = 0;
+    buf[pos] = ' '; pos += 1;
+    buf[pos] = 'd'; pos += 1;
+    buf[pos] = ':'; pos += 1;
+    buf[pos] = '['; pos += 1;
 
-    if (space_before_meta == 1) {
-        buf[pos] = ' ';
-        pos += 1;
-    }
+    // payload
+    const payload = dt.formatDueForSuffix(g_due_cfg, task.due_date, task.due_time, buf[pos .. buf.len - 1]);
+    pos += payload.len;
 
-    if (have_date) {
-        buf[pos] = 'd'; pos += 1;
-        buf[pos] = ':'; pos += 1;
-        buf[pos] = '['; pos += 1;
-
-        @memcpy(buf[pos .. pos + date.len], date);
-        pos += date.len;
-
-        if (has_time) {
-            buf[pos] = ' ';
-            pos += 1;
-            @memcpy(buf[pos .. pos + time.len], time);
-            pos += time.len;
-        }
-
-        buf[pos] = ']';
-        pos += 1;
-    }
-
-    if (have_repeat) {
-        if (have_date) {
-            buf[pos] = ' ';
-            pos += 1;
-        }
-
-        buf[pos] = 'r'; pos += 1;
-        buf[pos] = ':'; pos += 1;
-        buf[pos] = '['; pos += 1;
-
-        @memcpy(buf[pos .. pos + repeat.len], repeat);
-        pos += repeat.len;
-
-        buf[pos] = ']';
-        pos += 1;
-    }
-
+    buf[pos] = ']'; pos += 1;
     return buf[0..pos];
 }
 
