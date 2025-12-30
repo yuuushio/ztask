@@ -331,13 +331,12 @@ pub fn loadDueFormatConfigFromFile(
 
     // If empty, seed a tiny commented template (discoverable, not noisy).
     if (st.size == 0) {
+        // Write real defaults (not commented), so first-run behavior is explicit.
         const seed =
-            "# ztask.conf\n" ++
-            "# due_date = \"%d/%m/%Y\"\n" ++
-            "# due_time = \"%-I:%M %p\"\n" ++
-            "# due      = \"date at time\"  # also supports {date} and {time}\n";
-        _ = try file.write(seed);
-        // Keep defaults.
+            "due_date = \"%x\"\n" ++
+            "due_time = \"%H:%M\"\n" ++
+            "due = \"date time\"\n";
+        _ = try file.writeAll(seed);
     } else {
         // Cap size to keep latency bounded.
         if (st.size > 16 * 1024) return error.ConfigTooLarge;
