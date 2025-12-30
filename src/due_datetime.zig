@@ -807,3 +807,171 @@ const CompiledFormat = struct {
         return out[0..pos];
     }
 };
+
+fn appendFmtLit(
+    allocator: mem.Allocator,
+    list: *std.ArrayListUnmanaged(Tok),
+    a: usize,
+    b: usize,
+) !void {
+    if (b <= a) return;
+    const len = b - a;
+    if (a > std.math.maxInt(u16) or len > std.math.maxInt(u16)) return error.FormatTooLong;
+    try list.append(allocator, .{
+        .kind = .lit,
+        .a = @intCast(a),
+        .b = @intCast(len),
+    });
+}
+
+const MONTH_ABBR = [_][]const u8{
+    "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec",
+};
+const MONTH_FULL = [_][]const u8{
+    "January","February","March","April","May","June","July","August","September","October","November","December",
+};
+const WD_ABBR = [_][]const u8{
+    "Sun","Mon","Tue","Wed","Thu","Fri","Sat",
+};
+const WD_FULL = [_][]const u8{
+    "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday",
+};
+
+fn emitDateSpec(spec: Spec, y: u32, m: u32, d: u32, wd: u32, out: []u8, pos0: usize) usize {
+    var pos = pos0;
+    switch (spec) {
+        .percent => pos = emitByte('%', out, pos),
+
+        .a => pos = emitStr(WD_ABBR[@intCast(wd)], out, pos),
+        .A => pos = emitStr(WD_FULL[@intCast(wd)], out, pos),
+
+        .b => pos = emitStr(MONTH_ABBR[@intCast(m - 1)], out, pos),
+        .B => pos = emitStr(MONTH_FULL[@intCast(m - 1)], out, pos),
+
+        .d0 => pos = emit2(d, out, pos),
+        .d  => pos = emitU(d, out, pos),
+
+        .m0 => pos = emit2(m, out, pos),
+        .m  => pos = emitU(m, out, pos),
+
+        .y0 => pos = emit2(y % 100, out, pos),
+        .y  => pos = emitU(y % 100, out, pos),
+
+        .Y  => pos = emit4(y, out, pos),
+
+        .x  => pos = emitIsoDate(y, m, d, out, pos),
+
+        // date formatter should not see time specs, but remain harmless.
+        else => {},
+    }
+    return pos;
+}
+
+fn emitTimeSpec(spec: Spec, hh: u32, mm_: u32, out: []u8, pos0: usize) usize {
+    var pos = pos0;
+
+    const is_pm = hh >= 12;
+    const hour12: u32 = blk: {
+        var h = hh % 12;
+        if (h == 0) h = 12;
+        break :blk h;
+    };
+
+    switch (spec) {
+        .percent => pos = emitByte('%', out, pos),
+
+        .H0 => pos = emit2(hh, out, pos),
+        .H  => pos = emitU(hh, out, pos),
+
+        .I0 => pos = emit2(hour12, out, pos),
+        .I  => pos = emitU(hour12, out, pos),
+
+        .M0 => pos = emit2(mm_, out, pos),
+        .M  => pos = emitU(mm_, out, pos),
+
+        .p  => pos = emitStr(if (is_pm) "PM" else "AM", out, pos),
+
+        .X  => pos = emitIsoTime(hh, mm_, out, pos),
+
+        // time formatter should not see date specs, but remain harmless.
+        else => {},
+    }
+
+    return pos;
+}
+
+fn emitIsoDate(y: u32, m: u32, d: u32, out: []u8, pos0: usize) usize {
+    var pos = pos0;
+    pos = emit4(y, out, pos);
+    pos = emitByte('-', out, pos);
+    pos = emit2(m, out, pos);
+    pos = emitByte('-', out, pos);
+    pos = emit2(d, out, pos);
+    return pos;
+}
+
+fn emitIsoTime(hh: u32, mm_: u32, out: []u8, pos0: usize) usize {
+    var pos = pos0;
+    pos = emit2(hh, out, pos);
+    pos = emitByte(':', out, pos);
+    pos = emit2(mm_, out, pos);
+    return pos;
+}
+
+fn emitStr(s: []const u8, out: []u8, pos0: usize) usize {
+    var pos = pos0;
+    if (pos >= out.len) return pos;
+    const n = @min(out.len - pos, s.len);
+    mem.copyForwards(u8, out[pos .. pos + n], s[0..n]);
+    return pos + n;
+}
+
+fn emitByte(b: u8, out: []u8, pos0: usize) usize {
+    if (pos0 >= out.len) return pos0;
+    out[pos0] = b;
+    return pos0 + 1;
+}
+
+fn emit2(v: u32, out: []u8, pos0: usize) usize {
+    var pos = pos0;
+    const tens: u8 = @intCast((v / 10) % 10);
+    const ones: u8 = @intCast(v % 10);
+    pos = emitByte('0' + tens, out, pos);
+    pos = emitByte('0' + ones, out, pos);
+    return pos;
+}
+
+fn emit4(v: u32, out: []u8, pos0: usize) usize {
+    var pos = pos0;
+    const a: u8 = @intCast((v / 1000) % 10);
+    const b: u8 = @intCast((v / 100) % 10);
+    const c: u8 = @intCast((v / 10) % 10);
+    const d: u8 = @intCast(v % 10);
+    pos = emitByte('0' + a, out, pos);
+    pos = emitByte('0' + b, out, pos);
+    pos = emitByte('0' + c, out, pos);
+    pos = emitByte('0' + d, out, pos);
+    return pos;
+}
+
+fn emitU(v: u32, out: []u8, pos0: usize) usize {
+    // minimal decimal, no heap.
+    var tmp: [10]u8 = undefined;
+    var n: usize = 0;
+    var x = v;
+    while (true) {
+        tmp[n] = @intCast('0' + (x % 10));
+        n += 1;
+        x /= 10;
+        if (x == 0) break;
+        if (n == tmp.len) break;
+    }
+
+    var pos = pos0;
+    while (n > 0 and pos < out.len) {
+        n -= 1;
+        out[pos] = tmp[n];
+        pos += 1;
+    }
+    return pos;
+}
