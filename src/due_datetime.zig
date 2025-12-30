@@ -378,14 +378,17 @@ pub fn loadDueFormatConfigFromFile(
         }
     }
 
-    // Compile formats (tokenize once).
-    var date_fmt = try CompiledFormat.init(allocator, date_raw);
+    // Compile formats with fallback.
+    var date_fmt = CompiledFormat.init(allocator, date_raw) catch
+        try CompiledFormat.init(allocator, "%x");
     errdefer date_fmt.deinit(allocator);
 
-    var time_fmt = try CompiledFormat.init(allocator, time_raw);
+    var time_fmt = CompiledFormat.init(allocator, time_raw) catch
+        try CompiledFormat.init(allocator, "%H:%M");
     errdefer time_fmt.deinit(allocator);
 
-    var tmpl = try CompiledTemplate.init(allocator, tmpl_raw);
+    var tmpl = CompiledTemplate.init(allocator, tmpl_raw) catch
+        try CompiledTemplate.init(allocator, "date time");
     errdefer tmpl.deinit(allocator);
 
     return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
