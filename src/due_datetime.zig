@@ -556,3 +556,4 @@ const CompiledTemplate = struct {
         return out[0..pos];
     }
 };
+
