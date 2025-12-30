@@ -557,3 +557,73 @@ const CompiledTemplate = struct {
     }
 };
 
+fn appendLitTok(
+    allocator: mem.Allocator,
+    list: *std.ArrayListUnmanaged(TemplateTok),
+    a: usize,
+    b: usize,
+) !void {
+    if (b <= a) return;
+    const len = b - a;
+    if (len > std.math.maxInt(u16)) return error.TemplateTooLong;
+    const off_u16: u16 = @intCast(a);
+    const len_u16: u16 = @intCast(len);
+    try list.append(allocator, .{ .kind = .lit, .off = off_u16, .len = len_u16 });
+}
+
+fn matchLit(s: []const u8, at: usize, lit: []const u8) bool {
+    if (at + lit.len > s.len) return false;
+    return mem.eql(u8, s[at .. at + lit.len], lit);
+}
+
+fn isWordChar(b: u8) bool {
+    return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or (b >= '0' and b <= '9') or b == '_';
+}
+
+fn matchWord(s: []const u8, at: usize, w: []const u8) bool {
+    if (at + w.len > s.len) return false;
+    if (!mem.eql(u8, s[at .. at + w.len], w)) return false;
+
+    if (at > 0 and isWordChar(s[at - 1])) return false;
+    if (at + w.len < s.len and isWordChar(s[at + w.len])) return false;
+
+    return true;
+}
+
+fn trimAscii(s: []const u8) []const u8 {
+    var a: usize = 0;
+    var b: usize = s.len;
+    while (a < b and (s[a] == ' ' or s[a] == '\t' or s[a] == '\r')) a += 1;
+    while (b > a and (s[b - 1] == ' ' or s[b - 1] == '\t' or s[b - 1] == '\r')) b -= 1;
+    return s[a..b];
+}
+
+fn stripInlineComment(s: []const u8) []const u8 {
+    // Strip from first '#' or ';' that is not inside a double-quoted region.
+    var in_q = false;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (c == '"') in_q = !in_q;
+        if (!in_q and (c == '#' or c == ';')) return trimAscii(s[0..i]);
+    }
+    return s;
+}
+
+fn unquoteAscii(s: []const u8) []const u8 {
+    if (s.len >= 2 and s[0] == '"' and s[s.len - 1] == '"') return s[1 .. s.len - 1];
+    return s;
+}
+
+fn asciiLower(b: u8) u8 {
+    return if (b >= 'A' and b <= 'Z') b + 32 else b;
+}
+
+fn eqLower(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var i: usize = 0;
+    while (i < a.len) : (i += 1) {
+        if (asciiLower(a[i]) != asciiLower(b[i])) return false;
+    }
+    return true;
+}
