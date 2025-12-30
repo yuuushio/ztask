@@ -339,7 +339,16 @@ pub fn loadDueFormatConfigFromFile(
         _ = try file.writeAll(seed);
     } else {
         // Cap size to keep latency bounded.
-        if (st.size > 16 * 1024) return error.ConfigTooLarge;
+        if (st.size > 16 * 1024) {
+            // Treat as absent config for safety and latency bounds.
+            var date_fmt2 = try CompiledFormat.init(allocator, "%x");
+            errdefer date_fmt2.deinit(allocator);
+            var time_fmt2 = try CompiledFormat.init(allocator, "%H:%M");
+            errdefer time_fmt2.deinit(allocator);
+            var tmpl2 = try CompiledTemplate.init(allocator, "date time");
+            errdefer tmpl2.deinit(allocator);
+            return .{ .date = date_fmt2, .time = time_fmt2, .tmpl = tmpl2 };
+        }
 
         var buf = try allocator.alloc(u8, @intCast(st.size));
         defer allocator.free(buf);

@@ -75,10 +75,8 @@ const App = struct {
         self.index.deinit(allocator);
         self.todo.close();
         self.done.close();
-        self.dir.close();
         self.data_dir_handle.close();
         self.cfg_dir.close();
-        allocator.free(self.config_dir);
         allocator.free(self.config_dir);
         allocator.free(self.data_dir);
         self.* = undefined;
