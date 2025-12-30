@@ -360,7 +360,7 @@ pub fn loadDueFormatConfigFromFile(
             line = stripInlineComment(line);
 
             const eqi = mem.indexOfScalar(u8, line, '=') orelse continue;
-            var key = trimAscii(line[0..eqi]);
+            const key = trimAscii(line[0..eqi]);
             var val = trimAscii(line[eqi + 1 ..]);
 
             if (key.len == 0) continue;
@@ -458,7 +458,7 @@ const CompiledTemplate = struct {
 
     pub fn init(allocator: mem.Allocator, src: []const u8) !CompiledTemplate {
         // Always own raw to keep lifetime trivial.
-        var raw = try allocator.dupe(u8, src);
+        const raw = try allocator.dupe(u8, src);
         errdefer allocator.free(raw);
 
         var list: std.ArrayListUnmanaged(TemplateTok) = .{};
@@ -661,7 +661,7 @@ const CompiledFormat = struct {
     toks: []Tok,
 
     pub fn init(allocator: mem.Allocator, src: []const u8) !CompiledFormat {
-        var raw = try allocator.dupe(u8, src);
+        const raw = try allocator.dupe(u8, src);
         errdefer allocator.free(raw);
 
         var list: std.ArrayListUnmanaged(Tok) = .{};
@@ -919,7 +919,7 @@ fn emitIsoTime(hh: u32, mm_: u32, out: []u8, pos0: usize) usize {
 }
 
 fn emitStr(s: []const u8, out: []u8, pos0: usize) usize {
-    var pos = pos0;
+    const pos = pos0;
     if (pos >= out.len) return pos;
     const n = @min(out.len - pos, s.len);
     mem.copyForwards(u8, out[pos .. pos + n], s[0..n]);
@@ -975,3 +975,61 @@ fn emitU(v: u32, out: []u8, pos0: usize) usize {
     }
     return pos;
 }
+
+/// Canonical date parser: "YYYY-MM-DD"
+fn parseCanonDate(s: []const u8, y: *u32, m: *u32, d: *u32) bool {
+    if (s.len != 10) return false;
+    if (s[4] != '-' or s[7] != '-') return false;
+
+    const yv = parseDigits(s[0..4]) orelse return false;
+    const mv = parseDigits(s[5..7]) orelse return false;
+    const dv = parseDigits(s[8..10]) orelse return false;
+
+    if (mv < 1 or mv > 12) return false;
+    if (dv < 1 or dv > 31) return false;
+
+    y.* = yv;
+    m.* = mv;
+    d.* = dv;
+    return true;
+}
+
+/// Canonical time parser: "HH:MM"
+fn parseCanonTime(s: []const u8, hh: *u32, mm_: *u32) bool {
+    if (s.len != 5) return false;
+    if (s[2] != ':') return false;
+    const hv = parseDigits(s[0..2]) orelse return false;
+    const mv = parseDigits(s[3..5]) orelse return false;
+    if (hv > 23 or mv > 59) return false;
+    hh.* = hv;
+    mm_.* = mv;
+    return true;
+}
+
+fn parseDigits(s: []const u8) ?u32 {
+    if (s.len == 0) return null;
+    var v: u32 = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const b = s[i];
+        if (b < '0' or b > '9') return null;
+        v = v * 10 + @as(u32, b - '0');
+    }
+    return v;
+}
+
+// Sakamoto weekday, Gregorian calendar.
+// returns 0=Sun..6=Sat
+fn weekdayFromYMD(y_: u32, m_: u32, d_: u32) u32 {
+    var y = @as(i32, @intCast(y_));
+    const m = @as(i32, @intCast(m_));
+    const d = @as(i32, @intCast(d_));
+
+    const t = [_]i32{ 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    if (m < 3) y -= 1;
+    const w = y + y / 4 - y / 100 + y / 400 + t[@intCast(m - 1)] + d;
+    const r = w % 7;
+    return @intCast(if (r < 0) r + 7 else r);
+}
+
+
