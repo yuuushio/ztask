@@ -627,3 +627,183 @@ fn eqLower(a: []const u8, b: []const u8) bool {
     }
     return true;
 }
+
+/// ------------------------------
+/// Internal: format compiler
+/// ------------------------------
+
+const Spec = enum(u8) {
+    percent,
+    a, A,
+    b, B,
+    d0, d,
+    m0, m,
+    y0, y,
+    Y,
+    H0, H,
+    I0, I,
+    M0, M,
+    p,
+    x, // ISO date
+    X, // ISO time (HH:MM)
+};
+
+const TokKind = enum(u8) { lit, spec };
+
+const Tok = packed struct {
+    kind: TokKind,
+    a: u16, // for lit: off, for spec: Spec
+    b: u16, // for lit: len, for spec: unused
+};
+
+const CompiledFormat = struct {
+    raw:  []u8,
+    toks: []Tok,
+
+    pub fn init(allocator: mem.Allocator, src: []const u8) !CompiledFormat {
+        var raw = try allocator.dupe(u8, src);
+        errdefer allocator.free(raw);
+
+        var list: std.ArrayListUnmanaged(Tok) = .{};
+        errdefer list.deinit(allocator);
+
+        var i: usize = 0;
+        var lit_start: usize = 0;
+
+        while (i < raw.len) {
+            if (raw[i] != '%') {
+                i += 1;
+                continue;
+            }
+
+            // Flush literal before '%'.
+            if (i > lit_start) try appendFmtLit(allocator, &list, lit_start, i);
+
+            i += 1;
+            if (i >= raw.len) return error.InvalidFormat;
+
+            var no_pad = false;
+            if (raw[i] == '-') {
+                no_pad = true;
+                i += 1;
+                if (i >= raw.len) return error.InvalidFormat;
+            }
+
+            const c = raw[i];
+            i += 1;
+
+            const spec: Spec = switch (c) {
+                '%' => Spec.percent,
+
+                'a' => Spec.a,
+                'A' => Spec.A,
+                'b' => Spec.b,
+                'B' => Spec.B,
+
+                'd' => if (no_pad) Spec.d else Spec.d0,
+                'm' => if (no_pad) Spec.m else Spec.m0,
+                'y' => if (no_pad) Spec.y else Spec.y0,
+                'Y' => blk: {
+                    if (no_pad) return error.InvalidFormat;
+                    break :blk Spec.Y;
+                },
+
+                'H' => if (no_pad) Spec.H else Spec.H0,
+                'I' => if (no_pad) Spec.I else Spec.I0,
+                'M' => if (no_pad) Spec.M else Spec.M0,
+
+                'p' => blk: {
+                    if (no_pad) return error.InvalidFormat;
+                    break :blk Spec.p;
+                },
+
+                'x' => blk: {
+                    if (no_pad) return error.InvalidFormat;
+                    break :blk Spec.x;
+                },
+                'X' => blk: {
+                    if (no_pad) return error.InvalidFormat;
+                    break :blk Spec.X;
+                },
+
+                else => return error.InvalidFormat,
+            };
+
+            try list.append(allocator, .{
+                .kind = .spec,
+                .a = @intCast(@intFromEnum(spec)),
+                .b = 0,
+            });
+
+            lit_start = i;
+        }
+
+        if (i > lit_start) try appendFmtLit(allocator, &list, lit_start, i);
+
+        const toks = try list.toOwnedSlice(allocator);
+        errdefer allocator.free(toks);
+
+        return .{ .raw = raw, .toks = toks };
+    }
+
+    pub fn deinit(self: *CompiledFormat, allocator: mem.Allocator) void {
+        allocator.free(self.raw);
+        allocator.free(self.toks);
+        self.* = undefined;
+    }
+
+    pub fn formatDate(
+        self: *const CompiledFormat,
+        y: u32,
+        m: u32,
+        d: u32,
+        out: []u8,
+    ) []const u8 {
+        const wd = weekdayFromYMD(y, m, d);
+
+        var pos: usize = 0;
+        var i: usize = 0;
+        while (i < self.toks.len and pos < out.len) : (i += 1) {
+            const t = self.toks[i];
+            if (t.kind == .lit) {
+                const off: usize = t.a;
+                const len: usize = t.b;
+                const n = @min(out.len - pos, len);
+                mem.copyForwards(u8, out[pos .. pos + n], self.raw[off .. off + n]);
+                pos += n;
+                continue;
+            }
+
+            const spec: Spec = @enumFromInt(@as(u8, @intCast(t.a)));
+            pos = emitDateSpec(spec, y, m, d, wd, out, pos);
+        }
+
+        return out[0..pos];
+    }
+
+    pub fn formatTime(
+        self: *const CompiledFormat,
+        hh: u32,
+        mm_: u32,
+        out: []u8,
+    ) []const u8 {
+        var pos: usize = 0;
+        var i: usize = 0;
+        while (i < self.toks.len and pos < out.len) : (i += 1) {
+            const t = self.toks[i];
+            if (t.kind == .lit) {
+                const off: usize = t.a;
+                const len: usize = t.b;
+                const n = @min(out.len - pos, len);
+                mem.copyForwards(u8, out[pos .. pos + n], self.raw[off .. off + n]);
+                pos += n;
+                continue;
+            }
+
+            const spec: Spec = @enumFromInt(@as(u8, @intCast(t.a)));
+            pos = emitTimeSpec(spec, hh, mm_, out, pos);
+        }
+
+        return out[0..pos];
+    }
+};
