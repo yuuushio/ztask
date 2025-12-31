@@ -1038,8 +1038,13 @@ fn weekdayFromYMD(y_: u32, m_: u32, d_: u32) u32 {
 
     const t = [_]i32{ 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
     if (m < 3) y -= 1;
-    const w = y + y / 4 - y / 100 + y / 400 + t[@intCast(m - 1)] + d;
-    const r = w % 7;
+    const w = y
+        + @divTrunc(y, 4)
+        - @divTrunc(y, 100)
+        + @divTrunc(y, 400)
+        + t[@intCast(m - 1)]
+        + d;
+    const r = @rem(w,7);
     return @intCast(if (r < 0) r + 7 else r);
 }
 
