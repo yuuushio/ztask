@@ -316,92 +316,90 @@ pub const DueFormatConfig = struct {
     }
 };
 
+
 pub fn loadDueFormatConfigFromFile(
     allocator: mem.Allocator,
     file: fs.File,
 ) !DueFormatConfig {
-    // Defaults (duplicated into owned buffers so deinit stays trivial).
-    var date_raw: []const u8 = "%x";
-    var time_raw: []const u8 = "%H:%M";
-    var tmpl_raw: []const u8 = "date time";
+    // Start with compiled defaults (so invalid lines simply do nothing).
+    var date_fmt = try CompiledFormat.init(allocator, "%x");
+    errdefer date_fmt.deinit(allocator);
+
+    var time_fmt = try CompiledFormat.init(allocator, "%H:%M");
+    errdefer time_fmt.deinit(allocator);
+
+    var tmpl = try CompiledTemplate.init(allocator, "date time");
+    errdefer tmpl.deinit(allocator);
 
     // Read config file once.
     try file.seekTo(0);
     const st = try file.stat();
 
-    // If empty, seed a tiny commented template (discoverable, not noisy).
+    // If empty, seed explicit defaults and return compiled defaults.
     if (st.size == 0) {
-        // Write real defaults (not commented), so first-run behavior is explicit.
         const seed =
             "due_date = \"%x\"\n" ++
             "due_time = \"%H:%M\"\n" ++
             "due = \"date time\"\n";
         _ = try file.writeAll(seed);
-    } else {
-        // Cap size to keep latency bounded.
-        if (st.size > 16 * 1024) {
-            // Treat as absent config for safety and latency bounds.
-            var date_fmt2 = try CompiledFormat.init(allocator, "%x");
-            errdefer date_fmt2.deinit(allocator);
-            var time_fmt2 = try CompiledFormat.init(allocator, "%H:%M");
-            errdefer time_fmt2.deinit(allocator);
-            var tmpl2 = try CompiledTemplate.init(allocator, "date time");
-            errdefer tmpl2.deinit(allocator);
-            return .{ .date = date_fmt2, .time = time_fmt2, .tmpl = tmpl2 };
+        return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
+    }
+
+    // Cap size to keep latency bounded. Too big => keep defaults.
+    if (st.size > 16 * 1024) {
+        return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
+    }
+
+    var buf = try allocator.alloc(u8, @intCast(st.size));
+    defer allocator.free(buf);
+
+    try file.seekTo(0);
+    const n = try file.readAll(buf);
+    const src = buf[0..n];
+
+    // Parse key = value, ASCII, line-based.
+    var it = mem.splitScalar(u8, src, '\n');
+    while (it.next()) |line_raw| {
+        var line = trimAscii(line_raw);
+        if (line.len == 0) continue;
+        if (line[0] == '#' or line[0] == ';') continue;
+
+        // strip inline comments starting at '#' or ';' (not inside quotes).
+        line = stripInlineComment(line);
+
+        const eqi = mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = trimAscii(line[0..eqi]);
+        var val = trimAscii(line[eqi + 1 ..]);
+
+        if (key.len == 0 or val.len == 0) continue;
+
+        val = unquoteAscii(val);
+
+        if (eqLower(key, "due_date")) {
+            const nf = CompiledFormat.init(allocator, val) catch continue;
+            date_fmt.deinit(allocator);
+            date_fmt = nf;
+            continue;
         }
 
-        var buf = try allocator.alloc(u8, @intCast(st.size));
-        defer allocator.free(buf);
+        if (eqLower(key, "due_time")) {
+            const nf = CompiledFormat.init(allocator, val) catch continue;
+            time_fmt.deinit(allocator);
+            time_fmt = nf;
+            continue;
+        }
 
-        try file.seekTo(0);
-        const n = try file.readAll(buf);
-        const src = buf[0..n];
-
-        // Parse key = value, ASCII, line-based.
-        var it = mem.splitScalar(u8, src, '\n');
-        while (it.next()) |line_raw| {
-            var line = trimAscii(line_raw);
-            if (line.len == 0) continue;
-            if (line[0] == '#' or line[0] == ';') continue;
-
-            // strip inline comments starting at '#' or ';' (not inside quotes).
-            line = stripInlineComment(line);
-
-            const eqi = mem.indexOfScalar(u8, line, '=') orelse continue;
-            const key = trimAscii(line[0..eqi]);
-            var val = trimAscii(line[eqi + 1 ..]);
-
-            if (key.len == 0) continue;
-            if (val.len == 0) continue;
-
-            val = unquoteAscii(val);
-
-            // normalize key to lower without allocating
-            if (eqLower(key, "due_date")) {
-                date_raw = val;
-            } else if (eqLower(key, "due_time")) {
-                time_raw = val;
-            } else if (eqLower(key, "due")) {
-                tmpl_raw = val;
-            }
+        if (eqLower(key, "due")) {
+            const nt = CompiledTemplate.init(allocator, val) catch continue;
+            tmpl.deinit(allocator);
+            tmpl = nt;
+            continue;
         }
     }
 
-    // Compile formats with fallback.
-    var date_fmt = CompiledFormat.init(allocator, date_raw) catch
-        try CompiledFormat.init(allocator, "%x");
-    errdefer date_fmt.deinit(allocator);
-
-    var time_fmt = CompiledFormat.init(allocator, time_raw) catch
-        try CompiledFormat.init(allocator, "%H:%M");
-    errdefer time_fmt.deinit(allocator);
-
-    var tmpl = CompiledTemplate.init(allocator, tmpl_raw) catch
-        try CompiledTemplate.init(allocator, "date time");
-    errdefer tmpl.deinit(allocator);
-
     return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
 }
+
 
 /// Formats the due payload inside `d:[...]`.
 /// If date is empty -> returns empty.
@@ -1180,4 +1178,30 @@ test "%% renders a literal percent" {
     var out: [16]u8 = undefined;
     const s = fmt.formatDate(2025, 1, 1, out[0..]);
     try std.testing.expectEqualStrings("%Y", s);
+}
+
+test "config: due_date=%-d/%m/%Y due_time=%H:%M due='date time' renders" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cfg_text =
+        "due_date = \"%-d/%m/%Y\"\n" ++
+        "due_time = \"%H:%M\"\n" ++
+        "due = \"date time\"\n";
+
+    {
+        var f = try tmp.dir.createFile("ztask.conf", .{ .read = true, .truncate = true });
+        defer f.close();
+        try f.writeAll(cfg_text);
+    }
+
+    var f2 = try tmp.dir.openFile("ztask.conf", .{ .mode = .read_write });
+    defer f2.close();
+
+    var cfg = try loadDueFormatConfigFromFile(std.testing.allocator, f2);
+    defer cfg.deinit(std.testing.allocator);
+
+    var out: [64]u8 = undefined;
+    const s = formatDueForSuffix(&cfg, "2025-12-12", "15:00", out[0..]);
+    try std.testing.expectEqualStrings("12/12/2025 15:00", s);
 }
