@@ -659,6 +659,7 @@ const Spec = enum(u8) {
     X, // ISO time (HH:MM)
 };
 
+
 const TokKind = enum(u8) { lit, spec };
 
 const Tok = packed struct {
@@ -703,42 +704,7 @@ const CompiledFormat = struct {
             const c = raw[i];
             i += 1;
 
-            const spec: Spec = switch (c) {
-                '%' => Spec.percent,
-
-                'a' => Spec.a,
-                'A' => Spec.A,
-                'b' => Spec.b,
-                'B' => Spec.B,
-
-                'd' => if (no_pad) Spec.d else Spec.d0,
-                'm' => if (no_pad) Spec.m else Spec.m0,
-                'y' => if (no_pad) Spec.y else Spec.y0,
-                'Y' => blk: {
-                    if (no_pad) return error.InvalidFormat;
-                    break :blk Spec.Y;
-                },
-
-                'H' => if (no_pad) Spec.H else Spec.H0,
-                'I' => if (no_pad) Spec.I else Spec.I0,
-                'M' => if (no_pad) Spec.M else Spec.M0,
-
-                'p' => blk: {
-                    if (no_pad) return error.InvalidFormat;
-                    break :blk Spec.p;
-                },
-
-                'x' => blk: {
-                    if (no_pad) return error.InvalidFormat;
-                    break :blk Spec.x;
-                },
-                'X' => blk: {
-                    if (no_pad) return error.InvalidFormat;
-                    break :blk Spec.X;
-                },
-
-                else => return error.InvalidFormat,
-            };
+            const spec: Spec = try specFromChar(c, no_pad);
 
             try list.append(allocator, .{
                 .kind = .spec,
@@ -763,6 +729,43 @@ const CompiledFormat = struct {
         self.* = undefined;
     }
 
+
+    const DateCtx = struct { y: u32, m: u32, d: u32, wd: u32 };
+    const TimeCtx = struct { hh: u32, mm: u32 };
+
+    inline fn emitDate(spec: Spec, ctx: DateCtx, out: []u8, pos0: usize) usize {
+        return emitDateSpec(spec, ctx.y, ctx.m, ctx.d, ctx.wd, out, pos0);
+    }
+
+    inline fn emitTime(spec: Spec, ctx: TimeCtx, out: []u8, pos0: usize) usize {
+        return emitTimeSpec(spec, ctx.hh, ctx.mm, out, pos0);
+    }
+
+    inline fn formatCore(
+        self: *const CompiledFormat,
+        out: []u8,
+        ctx: anytype,
+        comptime emitFn: anytype,
+    ) []const u8 {
+        var pos: usize = 0;
+        var i: usize = 0;
+        while (i < self.toks.len and pos < out.len) : (i += 1) {
+            const t = self.toks[i];
+            if (t.kind == .lit) {
+                const off: usize = t.a;
+                const len: usize = t.b;
+                const n = @min(out.len - pos, len);
+                mem.copyForwards(u8, out[pos .. pos + n], self.raw[off .. off + n]);
+                pos += n;
+                continue;
+            }
+            const spec: Spec = @enumFromInt(@as(u8, @intCast(t.a)));
+            pos = emitFn(spec, ctx, out, pos);
+        }
+        return out[0..pos];
+
+    }
+
     pub fn formatDate(
         self: *const CompiledFormat,
         y: u32,
@@ -771,25 +774,8 @@ const CompiledFormat = struct {
         out: []u8,
     ) []const u8 {
         const wd = weekdayFromYMD(y, m, d);
-
-        var pos: usize = 0;
-        var i: usize = 0;
-        while (i < self.toks.len and pos < out.len) : (i += 1) {
-            const t = self.toks[i];
-            if (t.kind == .lit) {
-                const off: usize = t.a;
-                const len: usize = t.b;
-                const n = @min(out.len - pos, len);
-                mem.copyForwards(u8, out[pos .. pos + n], self.raw[off .. off + n]);
-                pos += n;
-                continue;
-            }
-
-            const spec: Spec = @enumFromInt(@as(u8, @intCast(t.a)));
-            pos = emitDateSpec(spec, y, m, d, wd, out, pos);
-        }
-
-        return out[0..pos];
+        return self.formatCore(out, DateCtx{ .y = y, .m = m, .d = d, .wd = wd }, emitDate);
+  
     }
 
     pub fn formatTime(
@@ -798,24 +784,34 @@ const CompiledFormat = struct {
         mm_: u32,
         out: []u8,
     ) []const u8 {
-        var pos: usize = 0;
-        var i: usize = 0;
-        while (i < self.toks.len and pos < out.len) : (i += 1) {
-            const t = self.toks[i];
-            if (t.kind == .lit) {
-                const off: usize = t.a;
-                const len: usize = t.b;
-                const n = @min(out.len - pos, len);
-                mem.copyForwards(u8, out[pos .. pos + n], self.raw[off .. off + n]);
-                pos += n;
-                continue;
-            }
+        return self.formatCore(out, TimeCtx{ .hh = hh, .mm = mm_ }, emitTime);
+    }
 
-            const spec: Spec = @enumFromInt(@as(u8, @intCast(t.a)));
-            pos = emitTimeSpec(spec, hh, mm_, out, pos);
-        }
+    fn specFromChar(c: u8, no_pad: bool) !Spec {
+        return switch (c) {
+            '%' => .percent,
 
-        return out[0..pos];
+            'a' => .a,
+            'A' => .A,
+            'b' => .b,
+            'B' => .B,
+
+            'd' => if (no_pad) .d else .d0,
+            'm' => if (no_pad) .m else .m0,
+            'y' => if (no_pad) .y else .y0,
+
+            'Y' => if (no_pad) error.InvalidFormat else .Y,
+
+            'H' => if (no_pad) .H else .H0,
+            'I' => if (no_pad) .I else .I0,
+            'M' => if (no_pad) .M else .M0,
+
+            'p' => if (no_pad) error.InvalidFormat else .p,
+            'x' => if (no_pad) error.InvalidFormat else .x,
+            'X' => if (no_pad) error.InvalidFormat else .X,
+
+            else => error.InvalidFormat,
+        };
     }
 };
 
@@ -1049,3 +1045,126 @@ fn weekdayFromYMD(y_: u32, m_: u32, d_: u32) u32 {
 }
 
 
+
+
+test "CompiledFormat: %-d works (unpadded day)" {
+    var cf = try CompiledFormat.init(std.testing.allocator, "%-d/%m/%Y");
+    defer cf.deinit(std.testing.allocator);
+
+    var out: [64]u8 = undefined;
+    const s = cf.formatDate(2025, 12, 3, out[0..]);
+    try std.testing.expectEqualStrings("3/12/2025", s);
+}
+
+test "CompiledFormat: padded vs unpadded day/month" {
+    {
+        var cf = try CompiledFormat.init(std.testing.allocator, "%d/%m/%Y");
+        defer cf.deinit(std.testing.allocator);
+
+        var out: [64]u8 = undefined;
+        const s = cf.formatDate(2025, 1, 3, out[0..]);
+        try std.testing.expectEqualStrings("03/01/2025", s);
+    }
+    {
+        var cf = try CompiledFormat.init(std.testing.allocator, "%-d/%-m/%Y");
+        defer cf.deinit(std.testing.allocator);
+
+        var out: [64]u8 = undefined;
+        const s = cf.formatDate(2025, 1, 3, out[0..]);
+        try std.testing.expectEqualStrings("3/1/2025", s);
+    }
+}
+
+test "CompiledFormat: time 12h + %p and %-I" {
+    var cf = try CompiledFormat.init(std.testing.allocator, "%-I:%M %p");
+    defer cf.deinit(std.testing.allocator);
+
+    var out: [64]u8 = undefined;
+
+    // 15:04 -> 3:04 PM
+    {
+        const s = cf.formatTime(15, 4, out[0..]);
+        try std.testing.expectEqualStrings("3:04 PM", s);
+    }
+    // 00:05 -> 12:05 AM
+    {
+        const s = cf.formatTime(0, 5, out[0..]);
+        try std.testing.expectEqualStrings("12:05 AM", s);
+    }
+    // 12:00 -> 12:00 PM
+    {
+        const s = cf.formatTime(12, 0, out[0..]);
+        try std.testing.expectEqualStrings("12:00 PM", s);
+    }
+}
+
+test "CompiledFormat: %x yields ISO date" {
+    var cf = try CompiledFormat.init(std.testing.allocator, "%x");
+    defer cf.deinit(std.testing.allocator);
+
+    var out: [64]u8 = undefined;
+    const s = cf.formatDate(2025, 12, 3, out[0..]);
+    try std.testing.expectEqualStrings("2025-12-03", s);
+}
+
+test "CompiledFormat: rejects unknown specifiers" {
+    try std.testing.expectError(error.InvalidFormat,
+        CompiledFormat.init(std.testing.allocator, "%Q"));
+    try std.testing.expectError(error.InvalidFormat,
+        CompiledFormat.init(std.testing.allocator, "%-Y"));
+    try std.testing.expectError(error.InvalidFormat,
+        CompiledFormat.init(std.testing.allocator, "%-p"));
+}
+
+
+test "date: %-d/%m/%Y renders non-padded day" {
+    var fmt = try CompiledFormat.init(std.testing.allocator, "%-d/%m/%Y");
+    defer fmt.deinit(std.testing.allocator);
+
+    var out: [32]u8 = undefined;
+    const s = fmt.formatDate(2025, 3, 2, out[0..]);
+    try std.testing.expectEqualStrings("2/03/2025", s);
+}
+
+test "date: %d/%m/%Y renders zero-padded day" {
+    var fmt = try CompiledFormat.init(std.testing.allocator, "%d/%m/%Y");
+    defer fmt.deinit(std.testing.allocator);
+
+    var out: [32]u8 = undefined;
+    const s = fmt.formatDate(2025, 3, 2, out[0..]);
+    try std.testing.expectEqualStrings("02/03/2025", s);
+}
+
+test "time: %-I:%M %p renders 12h hour without padding" {
+    var fmt = try CompiledFormat.init(std.testing.allocator, "%-I:%M %p");
+    defer fmt.deinit(std.testing.allocator);
+
+    var out: [32]u8 = undefined;
+    const s = fmt.formatTime(15, 0, out[0..]);
+    try std.testing.expectEqualStrings("3:00 PM", s);
+}
+
+test "time: %H%M renders 24h padded hour/minute" {
+    var fmt = try CompiledFormat.init(std.testing.allocator, "%H%M");
+    defer fmt.deinit(std.testing.allocator);
+
+    var out: [16]u8 = undefined;
+    const s = fmt.formatTime(3, 7, out[0..]);
+    try std.testing.expectEqualStrings("0307", s);
+}
+
+test "invalid specifier is rejected" {
+    try std.testing.expectError(
+        error.InvalidFormat,
+        CompiledFormat.init(std.testing.allocator, "%Q"),
+    );
+}
+
+test "%% renders a literal percent" {
+    var fmt = try CompiledFormat.init(std.testing.allocator, "%%Y");
+    defer fmt.deinit(std.testing.allocator);
+
+    var out: [16]u8 = undefined;
+    const s = fmt.formatDate(2025, 1, 1, out[0..]);
+    try std.testing.expectEqualStrings("%Y", s);
+}
