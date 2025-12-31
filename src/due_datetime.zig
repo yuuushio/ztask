@@ -568,6 +568,19 @@ const CompiledTemplate = struct {
     }
 };
 
+
+fn trimCfg(s: []const u8) []const u8 {
+    return std.mem.trim(u8, s, " \t\r\n");
+}
+
+fn stripQuotesCfg(s0: []const u8) []const u8 {
+    const s = trimCfg(s0);
+    if (s.len >= 2 and s[0] == '"' and s[s.len - 1] == '"') {
+        return s[1 .. s.len - 1];
+    }
+    return s;
+}
+
 fn appendLitTok(
     allocator: mem.Allocator,
     list: *std.ArrayListUnmanaged(TemplateTok),
