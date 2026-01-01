@@ -134,14 +134,12 @@ pub fn run(
     var vx = try vaxis.init(allocator, .{});
     defer vx.deinit(allocator, tty.writer());
 
-
     defer g_visible_todo.deinit(allocator);
     defer g_visible_done.deinit(allocator);
     defer g_due_today.deinit(allocator);
     defer g_undo.deinit(allocator);
     g_due_cfg = ctx.due_cfg;
     
-
     var view: AppView = .list;
     var return_view: AppView = .list;
     var editor = EditorState.init();
@@ -156,13 +154,14 @@ pub fn run(
     var list_cmd_done = false;
     var list_cmd_edit = false;
 
-
-
+    var pending_g_list: bool = false;
+    var pending_g_due: bool = false;
 
     var loop: vaxis.Loop(Event) = .{
         .tty = &tty,
         .vaxis = &vx,
     };
+
     try loop.init();
     try loop.start();
     defer loop.stop();
@@ -203,6 +202,8 @@ pub fn run(
                     switch (view) {
                         .list => {
                             if (list_cmd_active) {
+
+
                                 try handleListCommandKey(
                                     key,
                                     &view,
@@ -220,6 +221,9 @@ pub fn run(
                             }
 
                             if (key.matches(':', .{})) {
+
+                                pending_g_list = false;
+                                pending_g_due = false;
                                 list_cmd_active = true;
                                 list_cmd_new = false;
                                 list_cmd_done = false;
@@ -236,6 +240,9 @@ pub fn run(
                             }
 
                             if (key.matches('d', .{}) and !g_projects_focus) {
+                                pending_g_list = false;
+                                pending_g_due = false;
+
                                 g_projects_focus = false;
                                 try g_due_today.refresh(allocator, ctx.index);
                                 view = .due_today;
@@ -257,6 +264,23 @@ pub fn run(
                                 break :keypress;
                             }
 
+                            // gg / G navigation (task list only)
+                            {
+                                const visible = visibleIndicesForFocus(ui.focus);
+                                const vlen = visible.len;
+
+                                const lv = ui.activeView();
+                                clampViewToVisible(lv, vlen);
+
+                                if (!g_projects_focus) {
+                                    if (handleVimJumpKeys(key, lv, vlen, &pending_g_list)) {
+                                        break :keypress;
+                                    }
+                                } else {
+                                    pending_g_list = false;
+                                }
+                            }
+
                             if (key.matches('@', .{})) {
                                 try toggleTodoOngoing(ctx, allocator, ui);
                                 break :keypress;
@@ -273,6 +297,7 @@ pub fn run(
 
                         .due_today => {
                             if (list_cmd_active) {
+
                                 try handleListCommandKey(
                                     key, &view, &editor,
                                     &list_cmd_active, &list_cmd_new, &list_cmd_done, &list_cmd_edit,
@@ -283,6 +308,8 @@ pub fn run(
                             }
 
                             if (key.matches(':', .{})) {
+                                pending_g_due = false;
+
                                 list_cmd_active = true;
                                 list_cmd_new = false;
                                 list_cmd_done = false;
@@ -291,6 +318,7 @@ pub fn run(
                             }
 
                             if (key.matches('d', .{}) or key.matches(vaxis.Key.escape, .{})) {
+                                pending_g_due = false;
                                 view = .list;
                                 break :keypress;
                             }
@@ -310,11 +338,17 @@ pub fn run(
 
                             try g_due_today.maybeRefresh(allocator, ctx.index);
 
+
                             const visible = g_due_today.visible.items;
                             const vlen = visible.len;
                             if (vlen == 0) break :keypress;
 
                             clampViewToVisible(&due_view, vlen);
+
+                            if (handleVimJumpKeys(key, &due_view, vlen, &pending_g_due)){
+                                break :keypress;
+                            }
+
                             const sel_visible = due_view.selected_index;
                             const orig_idx = selectedOrigIndex(visible, &due_view) orelse break :keypress;
 
@@ -329,6 +363,7 @@ pub fn run(
                                     due_view.selected_index = if (sel_visible >= v2len) (v2len - 1) else sel_visible;
                                     if (due_view.scroll_offset >= v2len) due_view.scroll_offset = 0;
                                     due_view.last_move = -1;
+
                                 }
                                 break :keypress;
                             }
@@ -1400,6 +1435,7 @@ fn drawTaskListCore(
 }
 
 fn moveListViewSelection(view: *ListView, len: usize, delta: i32) void {
+
     if (len == 0) {
         view.selected_index = 0;
         view.scroll_offset = 0;
@@ -1515,6 +1551,56 @@ inline fn selectedOrigFromVisible(view: *ListView, visible: []const usize) ?usiz
     return selectedOrigIndex(visible, view);
 }
 
+fn resetListView(view: *ListView) void {
+    view.selected_index = 0;
+    view.scroll_offset = 0;
+    view.last_move = 0;
+}
+
+
+/// Handles:
+///   - gg -> top
+///   - G  -> bottom
+/// Any non-'g' key cancels a pending 'g'.
+fn handleVimJumpKeys(
+    key: vaxis.Key,
+    view: *ListView,
+    visible_len: usize,
+    pending_g: *bool,
+) bool {
+    if (key.matches('G', .{})) {
+        pending_g.* = false;
+
+        if (visible_len == 0) {
+            resetListView(view);
+        } else {
+            view.selected_index = visible_len - 1;
+            view.last_move = 1;
+            // Let drawTaskListCore compute the correct scroll offset.
+        }
+        return true;
+    }
+
+    if (key.matches('g', .{})) {
+        if (pending_g.*) {
+            pending_g.* = false;
+
+            if (visible_len == 0) {
+                resetListView(view);
+            } else {
+                view.selected_index = 0;
+                view.scroll_offset = 0;
+                view.last_move = -1;
+            }
+        } else {
+            pending_g.* = true;
+        }
+        return true;
+    }
+
+    pending_g.* = false;
+    return false;
+}
 
 
 fn keepRowAfterRebuild(view: *ListView, prev_sel: usize, new_len: usize) void {

@@ -7,6 +7,8 @@ pub const ListView = struct {
     selected_index: usize = 0,
     scroll_offset: usize = 0,
     last_move: i8 = 0,
+
+    pending_g: bool = false,
 };
 
 pub const UiState = struct {
@@ -41,6 +43,7 @@ pub const UiState = struct {
         delta: i32,
     ) void {
         var view = self.activeView();
+        view.pending_g = false;
 
         if (list_len == 0) {
             view.selected_index = 0;
