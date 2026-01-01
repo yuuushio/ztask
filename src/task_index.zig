@@ -245,7 +245,10 @@ pub const TaskIndex = struct {
     done_span_refs: []TextSpanRef,
     todo_span_pool: []TextSpan,
     done_span_pool: []TextSpan,
- 
+
+    inline fn freeIfNonEmpty(allocator: mem.Allocator, s: anytype) void {
+        if (s.len != 0) allocator.free(s);
+    }
 
     pub fn todoSlice(self: *const TaskIndex) []const Task {
         return self.todo_img.tasks;
@@ -343,65 +346,78 @@ pub const TaskIndex = struct {
         todo_file: fs.File,
         done_file: fs.File,
     ) !void {
-        // free old project lists first
-        allocator.free(self.projects_todo);
-        allocator.free(self.projects_done);
+        // Build new state first. If anything fails, `self` remains valid.
+        var todo_img_new = try store.loadFile(allocator, todo_file);
+        errdefer todo_img_new.deinit(allocator);
 
-        // free old span indices
-        allocator.free(self.todo_span_refs);
-        allocator.free(self.done_span_refs);
-        allocator.free(self.todo_span_pool);
-        allocator.free(self.done_span_pool);
+        var done_img_new = try store.loadFile(allocator, done_file);
+        errdefer done_img_new.deinit(allocator);
 
-        // free old images
-        self.todo_img.deinit(allocator);
-        self.done_img.deinit(allocator);
+        const projects_todo_new = try buildProjectsIndexForTasks(allocator, todo_img_new.tasks);
+        errdefer allocator.free(projects_todo_new);
 
-        // reload
-        var todo_img = try store.loadFile(allocator, todo_file);
-        errdefer todo_img.deinit(allocator);
+        const projects_done_new = try buildProjectsIndexForTasks(allocator, done_img_new.tasks);
+        errdefer allocator.free(projects_done_new);
 
-        var done_img = try store.loadFile(allocator, done_file);
-        errdefer done_img.deinit(allocator);
-
-        const projects_todo = try buildProjectsIndexForTasks(allocator, todo_img.tasks);
-        errdefer allocator.free(projects_todo);
-
-        const projects_done = try buildProjectsIndexForTasks(allocator, done_img.tasks);
-        errdefer allocator.free(projects_done);
-
-        const todo_max = maxProjectLabelLen(projects_todo);
-        const done_max = maxProjectLabelLen(projects_done);
-
-        const todo_spans = try buildSpanIndexForTasks(allocator, todo_img.tasks);
+        const todo_spans_new = try buildSpanIndexForTasks(allocator, todo_img_new.tasks);
         errdefer {
-            allocator.free(todo_spans.refs);
-            allocator.free(todo_spans.pool);
+            freeIfNonEmpty(allocator, todo_spans_new.refs);
+            freeIfNonEmpty(allocator, todo_spans_new.pool);
         }
 
-        const done_spans = try buildSpanIndexForTasks(allocator, done_img.tasks);
+        const done_spans_new = try buildSpanIndexForTasks(allocator, done_img_new.tasks);
         errdefer {
-            allocator.free(done_spans.refs);
-            allocator.free(done_spans.pool);
+            freeIfNonEmpty(allocator, done_spans_new.refs);
+            freeIfNonEmpty(allocator, done_spans_new.pool);
         }
 
-        self.todo_img = todo_img;
-        self.done_img = done_img;
-        self.todo = todo_img.tasks;
-        self.done = done_img.tasks;
-        self.projects_todo = projects_todo;
-        self.projects_done = projects_done;
+        const todo_max = maxProjectLabelLen(projects_todo_new);
+        const done_max = maxProjectLabelLen(projects_done_new);
+
+        // Stash old resources for disposal after swap.
+        const old_projects_todo = self.projects_todo;
+        const old_projects_done = self.projects_done;
+        const old_todo_span_refs = self.todo_span_refs;
+        const old_done_span_refs = self.done_span_refs;
+        const old_todo_span_pool = self.todo_span_pool;
+        const old_done_span_pool = self.done_span_pool;
+        var old_todo_img = self.todo_img;
+        var old_done_img = self.done_img;
+
+        // Swap in new.
+        self.todo_img = todo_img_new;
+        self.done_img = done_img_new;
+        self.todo = self.todo_img.tasks;
+        self.done = self.done_img.tasks;
+
+        self.projects_todo = projects_todo_new;
+        self.projects_done = projects_done_new;
         self.projects_todo_max_label = todo_max;
         self.projects_done_max_label = done_max;
+
+        self.todo_span_refs = todo_spans_new.refs;
+        self.todo_span_pool = todo_spans_new.pool;
+        self.done_span_refs = done_spans_new.refs;
+        self.done_span_pool = done_spans_new.pool;
+
+        // Dispose old.
+        allocator.free(old_projects_todo);
+        allocator.free(old_projects_done);
+        freeIfNonEmpty(allocator, old_todo_span_refs);
+        freeIfNonEmpty(allocator, old_done_span_refs);
+        freeIfNonEmpty(allocator, old_todo_span_pool);
+        freeIfNonEmpty(allocator, old_done_span_pool);
+        old_todo_img.deinit(allocator);
+        old_done_img.deinit(allocator);
     }
 
     pub fn deinit(self: *TaskIndex, allocator: mem.Allocator) void {
         allocator.free(self.projects_todo);
         allocator.free(self.projects_done);
-        allocator.free(self.todo_span_refs);
-        allocator.free(self.done_span_refs);
-        allocator.free(self.todo_span_pool);
-        allocator.free(self.done_span_pool);
+        freeIfNonEmpty(allocator, self.todo_span_refs);
+        freeIfNonEmpty(allocator, self.done_span_refs);
+        freeIfNonEmpty(allocator, self.todo_span_pool);
+        freeIfNonEmpty(allocator, self.done_span_pool);
         self.todo_img.deinit(allocator);
         self.done_img.deinit(allocator);
         self.* = undefined;
