@@ -45,15 +45,18 @@ pub const DueToday = struct {
         }
     }
 
-    pub fn maybeRefresh(self: *DueToday, allocator: std.mem.Allocator, index: *const TaskIndex) !void {
+
+    pub fn maybeRefresh(self: *DueToday, allocator: std.mem.Allocator, index: *const TaskIndex) !bool {
         var tmp: [10]u8 = undefined;
-        if (!fillTodayLocalIso(&tmp)) return;
+        if (!fillTodayLocalIso(&tmp)) return false;
 
         if (!self.today_valid or !std.mem.eql(u8, self.today_buf[0..], tmp[0..])) {
             self.today_buf = tmp;
             self.today_valid = true;
             try self.refreshNoRecalc(allocator, index, self.today_buf[0..]);
+            return true;
         }
+        return false;
     }
 
     fn refreshNoRecalc(self: *DueToday, allocator: std.mem.Allocator, index: *const TaskIndex, today: []const u8) !void {

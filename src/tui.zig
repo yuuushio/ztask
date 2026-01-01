@@ -9,6 +9,7 @@ var g_due_cfg: *const dt.DueFormatConfig = undefined;
 
 const due_today_mod = @import("due_today.zig");
 const task_index = @import("task_index.zig");
+const view_sort = @import("view_sort.zig");
 
 const Cell = vaxis.Cell;
 
@@ -65,6 +66,8 @@ var g_visible_todo = std.ArrayListUnmanaged(usize){};
 var g_visible_done = std.ArrayListUnmanaged(usize){};
 
 var g_due_today: due_today_mod.DueToday = .{};
+
+var g_sort_scratch: view_sort.Scratch = .{};
 
 
 var g_dbg_seq: u64 = 0;
@@ -138,6 +141,8 @@ pub fn run(
     defer g_visible_done.deinit(allocator);
     defer g_due_today.deinit(allocator);
     defer g_undo.deinit(allocator);
+    defer g_sort_scratch.deinit(allocator);
+
     g_due_cfg = ctx.due_cfg;
     
     var view: AppView = .list;
@@ -336,7 +341,11 @@ pub fn run(
                                 break :keypress;
                             }
 
-                            try g_due_today.maybeRefresh(allocator, ctx.index);
+
+                            if (try g_due_today.maybeRefresh(allocator, ctx.index)) {
+                                // Day rolled over. due_today partition changed. Re-sort all views once.
+                                try resortAllVisible(allocator, ctx.index);
+                            }
 
 
                             const visible = g_due_today.visible.items;
@@ -410,7 +419,11 @@ pub fn run(
 
         try processRepeats(ctx, allocator);
 
-        try g_due_today.maybeRefresh(allocator, ctx.index);
+
+        if (try g_due_today.maybeRefresh(allocator, ctx.index)) {
+            // Day rolled over. due_today partition changed. Re-sort all views once.
+            try resortAllVisible(allocator, ctx.index);
+        }
         const win = vx.window();
         clearAll(win);
 
@@ -584,6 +597,8 @@ fn rebuildVisibleAll(allocator: std.mem.Allocator, index: *const TaskIndex) !voi
     try rebuildVisibleFor(allocator, index, .todo);
     try rebuildVisibleFor(allocator, index, .done);
     try g_due_today.refresh(allocator, index);
+
+    try resortAllVisible(allocator, index);
 }
 
 fn visibleLenForFocus(focus: ListKind) usize {
@@ -598,6 +613,36 @@ fn visibleIndicesForFocus(focus: ListKind) []const usize {
         .todo => g_visible_todo.items,
         .done => g_visible_done.items,
     };
+}
+
+
+fn resortAllVisible(allocator: std.mem.Allocator, index: *const TaskIndex) !void {
+    // Ensure today is current for due_today partitioning.
+    const today = g_due_today.today_buf[0..];
+
+    try view_sort.sortVisibleDueTodayPrioCreated(
+        allocator,
+        &g_sort_scratch,
+        index.todoSlice(),
+        g_visible_todo.items,
+        today,
+    );
+
+    try view_sort.sortVisibleDueTodayPrioCreated(
+        allocator,
+        &g_sort_scratch,
+        index.doneSlice(),
+        g_visible_done.items,
+        today,
+    );
+
+    // due_today view itself: already filtered to today, so only prio->created
+    try view_sort.sortVisiblePrioCreated(
+        allocator,
+        &g_sort_scratch,
+        index.todoSlice(),
+        g_due_today.visible.items,
+    );
 }
 
 
