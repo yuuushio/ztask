@@ -428,51 +428,112 @@ pub fn loadDueFormatConfigFromFile(
 }
 
 
+fn isDigit(b: u8) bool {
+    return b >= '0' and b <= '9';
+}
+
+fn yyToYear(yy: u32) u32 {
+    return if (yy <= 68) (2000 + yy) else (1900 + yy);
+}
+
+fn writeCanonYMD(out: *[10]u8, y: u32, m: u32, d: u32) void {
+    out[0] = '0' + @as(u8, @intCast((y / 1000) % 10));
+    out[1] = '0' + @as(u8, @intCast((y / 100) % 10));
+    out[2] = '0' + @as(u8, @intCast((y / 10) % 10));
+    out[3] = '0' + @as(u8, @intCast(y % 10));
+    out[4] = '-';
+    out[5] = '0' + @as(u8, @intCast((m / 10) % 10));
+    out[6] = '0' + @as(u8, @intCast(m % 10));
+    out[7] = '-';
+    out[8] = '0' + @as(u8, @intCast((d / 10) % 10));
+    out[9] = '0' + @as(u8, @intCast(d % 10));
+}
+
+fn parseFixedDigits(s: []const u8, pos: *usize, n: usize) ?u32 {
+    if (pos.* + n > s.len) return null;
+    var v: u32 = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const b = s[pos.* + i];
+        if (!isDigit(b)) return null;
+        v = v * 10 + @as(u32, b - '0');
+    }
+    pos.* += n;
+    return v;
+}
+
+// For %-d / %-m / %-y: accept 1 or 2 digits; reject a padded 2-digit form like "01".
+fn parseVarDigitsNoPad(s: []const u8, pos: *usize, min: usize, max: usize) ?u32 {
+    if (pos.* >= s.len) return null;
+
+    var n: usize = 0;
+    var v: u32 = 0;
+    var first: u8 = 0;
+
+    while (pos.* < s.len and n < max) {
+        const b = s[pos.*];
+        if (!isDigit(b)) break;
+        if (n == 0) first = b;
+
+        v = v * 10 + @as(u32, b - '0');
+        pos.* += 1;
+        n += 1;
+    }
+
+    if (n < min) return null;
+    if (n == 2 and first == '0') return null; // strict no-pad
+    return v;
+}
+
+fn parseIsoYmdStrictToBuf(s: []const u8, out: *[10]u8) bool {
+    if (s.len != 10) return false;
+    if (s[4] != '-' or s[7] != '-') return false;
+
+    var pos: usize = 0;
+    const y = parseFixedDigits(s, &pos, 4) orelse return false;
+    if (pos >= s.len or s[pos] != '-') return false;
+    pos += 1;
+    const m = parseFixedDigits(s, &pos, 2) orelse return false;
+    if (pos >= s.len or s[pos] != '-') return false;
+    pos += 1;
+    const d = parseFixedDigits(s, &pos, 2) orelse return false;
+    if (pos != s.len) return false;
+
+    if (y < 1970 or y > 9999) return false;
+    if (m < 1 or m > 12) return false;
+    const dim = daysInMonth(y, m);
+    if (d < 1 or d > dim) return false;
+
+    writeCanonYMD(out, y, m, d);
+    return true;
+}
+
 fn isValidEditorDateFormat(fmt: *const CompiledFormat) bool {
-    var have_x = false;
-
-    var have_y = false;
-    var have_m = false;
-    var have_d = false;
-
-    var ti: usize = 0;
-    while (ti < fmt.toks.len) : (ti += 1) {
-        const t = fmt.toks[ti];
-        if (t.kind == .lit) continue;
+    var i: usize = 0;
+    while (i < fmt.toks.len) : (i += 1) {
+        const t = fmt.toks[i];
+        if (t.kind != .spec) continue;
 
         const spec: Spec = @enumFromInt(@as(u8, @intCast(t.a)));
         switch (spec) {
-            .percent => {},
+            .percent,
+            .d0, .d,
+            .m0, .m,
+            .y0, .y,
+            .Y,
+            .x,
+            => {},
 
-            .x => {
-                have_x = true;
-            },
-
-            .d0, .d => have_d = true,
-            .m0, .m => have_m = true,
-            .y0, .y, .Y => have_y = true,
-
-            // Reject anything we cannot parse cheaply and deterministically.
-            // This includes weekday/month-name tokens and all time tokens.
             else => return false,
         }
     }
-
-    if (have_x) {
-        // %x already encodes YYYY-MM-DD; mixing with other fields is ambiguous.
-        if (have_y or have_m or have_d) return false;
-        return true;
-    }
-
-    return have_y and have_m and have_d;
+    return true;
 }
 
-pub fn parseUserDueDateCanonicalByFormat(
-    fmt: *const CompiledFormat,
-    input0: []const u8,
-    out: *[10]u8,
-) bool {
-    var s = trimAsciiSpaces(input0);
+// Strict parser driven by CompiledFormat tokens.
+// Consumes the whole input, and produces canonical YYYY-MM-DD.
+pub fn parseUserDueDateCanonicalByFormat(fmt: *const CompiledFormat, input: []const u8, out: *[10]u8) bool {
+    const s = trimAsciiSpaces(input);
     if (s.len == 0) return false;
 
     var pos: usize = 0;
@@ -507,54 +568,59 @@ pub fn parseUserDueDateCanonicalByFormat(
 
             .x => {
                 if (pos + 10 > s.len) return false;
+                var tmp: [10]u8 = undefined;
+                if (!parseIsoYmdStrictToBuf(s[pos .. pos + 10], &tmp)) return false;
+
+                // decode back into y/m/d so we can validate presence if mixed formats are ever allowed
+                // and unify the final writer path.
                 var yy: u32 = 0;
                 var mm: u32 = 0;
                 var dd: u32 = 0;
-                if (!parseCanonDate(s[pos .. pos + 10], &yy, &mm, &dd)) return false;
+                if (!parseCanonDate(tmp[0..], &yy, &mm, &dd)) return false;
+
                 y = yy; m = mm; d = dd;
                 have_y = true; have_m = true; have_d = true;
                 pos += 10;
             },
 
             .d0 => {
-                const v = parseDigitsExact(s, &pos, 2) orelse return false;
+                const v = parseFixedDigits(s, &pos, 2) orelse return false;
                 d = v; have_d = true;
             },
             .d => {
-                const v = parseDigitsVar1to2NoPad(s, &pos) orelse return false;
+                const v = parseVarDigitsNoPad(s, &pos, 1, 2) orelse return false;
                 d = v; have_d = true;
             },
 
             .m0 => {
-                const v = parseDigitsExact(s, &pos, 2) orelse return false;
+                const v = parseFixedDigits(s, &pos, 2) orelse return false;
                 m = v; have_m = true;
             },
             .m => {
-                const v = parseDigitsVar1to2NoPad(s, &pos) orelse return false;
+                const v = parseVarDigitsNoPad(s, &pos, 1, 2) orelse return false;
                 m = v; have_m = true;
             },
 
             .y0 => {
-                const v = parseDigitsExact(s, &pos, 2) orelse return false;
-                y = pivotYear2(v); have_y = true;
+                const v = parseFixedDigits(s, &pos, 2) orelse return false;
+                y = yyToYear(v); have_y = true;
             },
             .y => {
-                const v = parseDigitsVar1to2NoPad(s, &pos) orelse return false;
-                y = pivotYear2(v); have_y = true;
+                const v = parseVarDigitsNoPad(s, &pos, 1, 2) orelse return false;
+                y = yyToYear(v); have_y = true;
             },
 
             .Y => {
-                const v = parseDigitsExact(s, &pos, 4) orelse return false;
+                const v = parseFixedDigits(s, &pos, 4) orelse return false;
                 y = v; have_y = true;
             },
 
-            // Disallow everything else for editor parsing.
             else => return false,
         }
     }
 
     if (pos != s.len) return false;
-    if (!(have_y and have_m and have_d)) return false;
+    if (!have_y or !have_m or !have_d) return false;
 
     if (y < 1970 or y > 9999) return false;
     if (m < 1 or m > 12) return false;
@@ -565,59 +631,23 @@ pub fn parseUserDueDateCanonicalByFormat(
     return true;
 }
 
-fn parseDigitsExact(s: []const u8, pos: *usize, n: usize) ?u32 {
-    if (pos.* + n > s.len) return null;
-    var v: u32 = 0;
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const b = s[pos.* + i];
-        if (b < '0' or b > '9') return null;
-        v = v * 10 + @as(u32, b - '0');
-    }
-    pos.* += n;
-    return v;
-}
+// Editor entry point.
+// Accepts ISO YYYY-MM-DD always.
+// If editor_due_date exists, accept exactly that format (strict) as the alternative.
+// If editor_due_date is disabled/null, fall back to your original relaxed parser.
+pub fn parseUserEditorDueDateCanonical(cfg: *const DueFormatConfig, input: []const u8, out: *[10]u8) bool {
+    const s = trimAsciiSpaces(input);
+    if (s.len == 0) return false;
 
-// For %-d, %-m, %-y: 1 or 2 digits, but reject padded forms like "01".
-fn parseDigitsVar1to2NoPad(s: []const u8, pos: *usize) ?u32 {
-    if (pos.* >= s.len) return null;
+    if (parseIsoYmdStrictToBuf(s, out)) return true;
 
-    const b0 = s[pos.*];
-    if (b0 < '0' or b0 > '9') return null;
-
-    // If the user typed a leading zero and also provided a second digit, treat as padded and reject.
-    var v: u32 = @as(u32, b0 - '0');
-    pos.* += 1;
-
-    if (pos.* < s.len) {
-        const b1 = s[pos.*];
-        if (b1 >= '0' and b1 <= '9') {
-            if (b0 == '0') return null;
-            v = v * 10 + @as(u32, b1 - '0');
-            pos.* += 1;
-        }
+    if (cfg.editor_date) |*f| {
+        return parseUserDueDateCanonicalByFormat(f, s, out);
     }
 
-    return v;
+    return parseUserDueDateCanonical(s, out);
 }
 
-fn pivotYear2(v: u32) u32 {
-    if (v <= 68) return 2000 + v;
-    return 1900 + v;
-}
-
-fn writeCanonYMD(out: *[10]u8, y: u32, m: u32, d: u32) void {
-    out[0] = '0' + @as(u8, @intCast((y / 1000) % 10));
-    out[1] = '0' + @as(u8, @intCast((y / 100) % 10));
-    out[2] = '0' + @as(u8, @intCast((y / 10) % 10));
-    out[3] = '0' + @as(u8, @intCast(y % 10));
-    out[4] = '-';
-    out[5] = '0' + @as(u8, @intCast((m / 10) % 10));
-    out[6] = '0' + @as(u8, @intCast(m % 10));
-    out[7] = '-';
-    out[8] = '0' + @as(u8, @intCast((d / 10) % 10));
-    out[9] = '0' + @as(u8, @intCast(d % 10));
-}
 
 
 /// Formats the due payload inside `d:[...]`.
