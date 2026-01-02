@@ -877,34 +877,6 @@ fn canonicalRepeatFromEditor(
     return &[_]u8{};
 }
 
-fn canonicalDueFromEditor(
-    editor: *const EditorState,
-    date_buf: *[10]u8,
-    time_buf: *[5]u8,
-) struct {
-    date: []const u8,
-    time: []const u8,
-} {
-    const raw_date = editor.dueSlice();
-    const raw_time = editor.timeSlice();
-
-    var date_slice: []const u8 = &[_]u8{};
-    var time_slice: []const u8 = &[_]u8{};
-
-    if (dt.parseUserDueDateCanonical(raw_date, date_buf)) {
-        date_slice = date_buf[0..];
-
-        // Only consider time when date is valid
-        if (dt.parseUserDueTimeCanonical(raw_time, time_buf)) {
-            time_slice = time_buf[0..];
-        }
-    }
-
-    return .{
-        .date = date_slice,
-        .time = time_slice,
-    };
-}
 
 const EditorState = struct {
     pub const Mode = enum {
@@ -3021,6 +2993,74 @@ fn saveEditorToDisk(
 }
 
 
+fn saveNewTask(
+    ctx: *TuiContext,
+    allocator: std.mem.Allocator,
+    editor: *EditorState,
+    ui: *UiState,
+) !bool {
+    const text = editor.taskSlice();
+    if (text.len == 0) {
+        editor.toastError("empty task text");
+        return false;
+    }
+
+    var date_buf: [10]u8 = undefined;
+    var time_buf: [5]u8 = undefined;
+
+    var repeat_buf: [16]u8 = undefined;
+    const v = validateEditorFields(editor, &date_buf, &time_buf, &repeat_buf);
+    if (!v.ok) return false;
+
+    const prio_val: u8 = editor.priorityValue();
+
+    var max_id: u64 = 0;
+    for (ctx.index.todoSlice()) |t| {
+        if (t.id > max_id) max_id = t.id;
+    }
+    for (ctx.index.doneSlice()) |t| {
+        if (t.id > max_id) max_id = t.id;
+    }
+
+    const new_id: u64 = max_id + 1;
+    const now_ms: i64 = std.time.milliTimestamp();
+
+    const new_task: store.Task = .{
+        .id         = new_id,
+        .text       = text,
+        .proj_first = 0,
+        .proj_count = 0,
+        .ctx_first  = 0,
+        .ctx_count  = 0,
+        .priority   = prio_val,
+        .status     = .todo,
+        .due_date   = v.due_date,
+        .due_time   = v.due_time,
+        .repeat     = v.repeat,
+        .repeat_next_ms = 0,
+        .created_ms = now_ms,
+    };
+
+    try g_undo.armAdd(allocator, .todo, new_task);
+
+    var file = ctx.todo_file.*;
+    try store.appendJsonTaskLine(allocator, &file, new_task);
+    try ctx.index.reload(allocator, file, ctx.done_file.*);
+
+    try rebuildVisibleAll(allocator, ctx.index);
+
+    if (ctx.index.todoSlice().len != 0) {
+        ui.focus = .todo;
+        var todo_view = &ui.todo;
+        todo_view.selected_index = ctx.index.todoSlice().len - 1;
+        todo_view.last_move = 1;
+    }
+
+    return true;
+}
+
+
+
 fn saveExistingTask(
     ctx: *TuiContext,
     allocator: std.mem.Allocator,
@@ -3137,7 +3177,11 @@ fn validateEditorFields(
 
     var d: Tri = .empty;
     if (raw_date.len != 0) {
-        d = if (dt.parseUserDueDateCanonical(raw_date, date_buf)) .ok else .invalid;
+        if (g_due_cfg.editor_date) |*f| {
+            d = if (dt.parseUserDueDateCanonicalByFormat(f, raw_date, date_buf)) .ok else .invalid;
+        } else {
+            d = if (dt.parseUserDueDateCanonical(raw_date, date_buf)) .ok else .invalid;
+        }
     }
 
     if (d == .invalid) {
@@ -3177,72 +3221,6 @@ fn validateEditorFields(
     return .{ .ok = true, .due_date = due_date, .due_time = due_time, .repeat = repeat };
 }
 
-
-fn saveNewTask(
-    ctx: *TuiContext,
-    allocator: std.mem.Allocator,
-    editor: *EditorState,
-    ui: *UiState,
-) !bool {
-    const text = editor.taskSlice();
-    if (text.len == 0) {
-        editor.toastError("empty task text");
-        return false;
-    }
-
-    var date_buf: [10]u8 = undefined;
-    var time_buf: [5]u8 = undefined;
-
-    var repeat_buf: [16]u8 = undefined;
-    const v = validateEditorFields(editor, &date_buf, &time_buf, &repeat_buf);
-    if (!v.ok) return false;
-
-    const prio_val: u8 = editor.priorityValue();
-
-    var max_id: u64 = 0;
-    for (ctx.index.todoSlice()) |t| {
-        if (t.id > max_id) max_id = t.id;
-    }
-    for (ctx.index.doneSlice()) |t| {
-        if (t.id > max_id) max_id = t.id;
-    }
-
-    const new_id: u64 = max_id + 1;
-    const now_ms: i64 = std.time.milliTimestamp();
-
-    const new_task: store.Task = .{
-        .id         = new_id,
-        .text       = text,
-        .proj_first = 0,
-        .proj_count = 0,
-        .ctx_first  = 0,
-        .ctx_count  = 0,
-        .priority   = prio_val,
-        .status     = .todo,
-        .due_date   = v.due_date,
-        .due_time   = v.due_time,
-        .repeat     = v.repeat,
-        .repeat_next_ms = 0,
-        .created_ms = now_ms,
-    };
-
-    try g_undo.armAdd(allocator, .todo, new_task);
-
-    var file = ctx.todo_file.*;
-    try store.appendJsonTaskLine(allocator, &file, new_task);
-    try ctx.index.reload(allocator, file, ctx.done_file.*);
-
-    try rebuildVisibleAll(allocator, ctx.index);
-
-    if (ctx.index.todoSlice().len != 0) {
-        ui.focus = .todo;
-        var todo_view = &ui.todo;
-        todo_view.selected_index = ctx.index.todoSlice().len - 1;
-        todo_view.last_move = 1;
-    }
-
-    return true;
-}
 
 
 fn markDone(
@@ -4297,3 +4275,4 @@ fn drawTodoList(
     );
 
 }
+

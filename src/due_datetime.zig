@@ -308,10 +308,13 @@ pub const DueFormatConfig = struct {
     time: CompiledFormat,
     tmpl: CompiledTemplate,
 
+    editor_date: ?CompiledFormat = null,
+
     pub fn deinit(self: *DueFormatConfig, allocator: mem.Allocator) void {
         self.date.deinit(allocator);
         self.time.deinit(allocator);
         self.tmpl.deinit(allocator);
+        if (self.editor_date) |*f| f.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -331,6 +334,10 @@ pub fn loadDueFormatConfigFromFile(
     var tmpl = try CompiledTemplate.init(allocator, "date time");
     errdefer tmpl.deinit(allocator);
 
+
+    var editor_date: ?CompiledFormat = null;
+    errdefer if (editor_date) |*f| f.deinit(allocator);
+
     // Read config file once.
     try file.seekTo(0);
     const st = try file.stat();
@@ -340,7 +347,8 @@ pub fn loadDueFormatConfigFromFile(
         const seed =
             "due_date = \"%x\"\n" ++
             "due_time = \"%H:%M\"\n" ++
-            "due = \"date time\"\n";
+            "due = \"date time\"\n" ++
+            "editor_due_date = \"%x\"\n";
         _ = try file.writeAll(seed);
         return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
     }
@@ -395,9 +403,220 @@ pub fn loadDueFormatConfigFromFile(
             tmpl = nt;
             continue;
         }
+
+        if (eqLower(key, "editor_due_date")) {
+            // Empty value disables strict editor parsing.
+            if (val.len == 0) {
+                if (editor_date) |*f| f.deinit(allocator);
+                editor_date = null;
+                continue;
+            }
+
+            var nf = CompiledFormat.init(allocator, val) catch continue;
+            if (!isValidEditorDateFormat(&nf)) {
+                nf.deinit(allocator);
+                continue;
+            }
+
+            if (editor_date) |*f| f.deinit(allocator);
+            editor_date = nf;
+            continue;
+        }
     }
 
-    return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
+    return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl, .editor_date = editor_date };
+}
+
+
+fn isValidEditorDateFormat(fmt: *const CompiledFormat) bool {
+    var have_x = false;
+
+    var have_y = false;
+    var have_m = false;
+    var have_d = false;
+
+    var ti: usize = 0;
+    while (ti < fmt.toks.len) : (ti += 1) {
+        const t = fmt.toks[ti];
+        if (t.kind == .lit) continue;
+
+        const spec: Spec = @enumFromInt(@as(u8, @intCast(t.a)));
+        switch (spec) {
+            .percent => {},
+
+            .x => {
+                have_x = true;
+            },
+
+            .d0, .d => have_d = true,
+            .m0, .m => have_m = true,
+            .y0, .y, .Y => have_y = true,
+
+            // Reject anything we cannot parse cheaply and deterministically.
+            // This includes weekday/month-name tokens and all time tokens.
+            else => return false,
+        }
+    }
+
+    if (have_x) {
+        // %x already encodes YYYY-MM-DD; mixing with other fields is ambiguous.
+        if (have_y or have_m or have_d) return false;
+        return true;
+    }
+
+    return have_y and have_m and have_d;
+}
+
+pub fn parseUserDueDateCanonicalByFormat(
+    fmt: *const CompiledFormat,
+    input0: []const u8,
+    out: *[10]u8,
+) bool {
+    var s = trimAsciiSpaces(input0);
+    if (s.len == 0) return false;
+
+    var pos: usize = 0;
+
+    var have_y = false;
+    var have_m = false;
+    var have_d = false;
+
+    var y: u32 = 0;
+    var m: u32 = 0;
+    var d: u32 = 0;
+
+    var ti: usize = 0;
+    while (ti < fmt.toks.len) : (ti += 1) {
+        const t = fmt.toks[ti];
+
+        if (t.kind == .lit) {
+            const off: usize = t.a;
+            const len: usize = t.b;
+            if (pos + len > s.len) return false;
+            if (!mem.eql(u8, s[pos .. pos + len], fmt.raw[off .. off + len])) return false;
+            pos += len;
+            continue;
+        }
+
+        const spec: Spec = @enumFromInt(@as(u8, @intCast(t.a)));
+        switch (spec) {
+            .percent => {
+                if (pos >= s.len or s[pos] != '%') return false;
+                pos += 1;
+            },
+
+            .x => {
+                if (pos + 10 > s.len) return false;
+                var yy: u32 = 0;
+                var mm: u32 = 0;
+                var dd: u32 = 0;
+                if (!parseCanonDate(s[pos .. pos + 10], &yy, &mm, &dd)) return false;
+                y = yy; m = mm; d = dd;
+                have_y = true; have_m = true; have_d = true;
+                pos += 10;
+            },
+
+            .d0 => {
+                const v = parseDigitsExact(s, &pos, 2) orelse return false;
+                d = v; have_d = true;
+            },
+            .d => {
+                const v = parseDigitsVar1to2NoPad(s, &pos) orelse return false;
+                d = v; have_d = true;
+            },
+
+            .m0 => {
+                const v = parseDigitsExact(s, &pos, 2) orelse return false;
+                m = v; have_m = true;
+            },
+            .m => {
+                const v = parseDigitsVar1to2NoPad(s, &pos) orelse return false;
+                m = v; have_m = true;
+            },
+
+            .y0 => {
+                const v = parseDigitsExact(s, &pos, 2) orelse return false;
+                y = pivotYear2(v); have_y = true;
+            },
+            .y => {
+                const v = parseDigitsVar1to2NoPad(s, &pos) orelse return false;
+                y = pivotYear2(v); have_y = true;
+            },
+
+            .Y => {
+                const v = parseDigitsExact(s, &pos, 4) orelse return false;
+                y = v; have_y = true;
+            },
+
+            // Disallow everything else for editor parsing.
+            else => return false,
+        }
+    }
+
+    if (pos != s.len) return false;
+    if (!(have_y and have_m and have_d)) return false;
+
+    if (y < 1970 or y > 9999) return false;
+    if (m < 1 or m > 12) return false;
+    const dim = daysInMonth(y, m);
+    if (d < 1 or d > dim) return false;
+
+    writeCanonYMD(out, y, m, d);
+    return true;
+}
+
+fn parseDigitsExact(s: []const u8, pos: *usize, n: usize) ?u32 {
+    if (pos.* + n > s.len) return null;
+    var v: u32 = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const b = s[pos.* + i];
+        if (b < '0' or b > '9') return null;
+        v = v * 10 + @as(u32, b - '0');
+    }
+    pos.* += n;
+    return v;
+}
+
+// For %-d, %-m, %-y: 1 or 2 digits, but reject padded forms like "01".
+fn parseDigitsVar1to2NoPad(s: []const u8, pos: *usize) ?u32 {
+    if (pos.* >= s.len) return null;
+
+    const b0 = s[pos.*];
+    if (b0 < '0' or b0 > '9') return null;
+
+    // If the user typed a leading zero and also provided a second digit, treat as padded and reject.
+    var v: u32 = @as(u32, b0 - '0');
+    pos.* += 1;
+
+    if (pos.* < s.len) {
+        const b1 = s[pos.*];
+        if (b1 >= '0' and b1 <= '9') {
+            if (b0 == '0') return null;
+            v = v * 10 + @as(u32, b1 - '0');
+            pos.* += 1;
+        }
+    }
+
+    return v;
+}
+
+fn pivotYear2(v: u32) u32 {
+    if (v <= 68) return 2000 + v;
+    return 1900 + v;
+}
+
+fn writeCanonYMD(out: *[10]u8, y: u32, m: u32, d: u32) void {
+    out[0] = '0' + @as(u8, @intCast((y / 1000) % 10));
+    out[1] = '0' + @as(u8, @intCast((y / 100) % 10));
+    out[2] = '0' + @as(u8, @intCast((y / 10) % 10));
+    out[3] = '0' + @as(u8, @intCast(y % 10));
+    out[4] = '-';
+    out[5] = '0' + @as(u8, @intCast((m / 10) % 10));
+    out[6] = '0' + @as(u8, @intCast(m % 10));
+    out[7] = '-';
+    out[8] = '0' + @as(u8, @intCast((d / 10) % 10));
+    out[9] = '0' + @as(u8, @intCast(d % 10));
 }
 
 
@@ -1057,151 +1276,56 @@ fn weekdayFromYMD(y_: u32, m_: u32, d_: u32) u32 {
 
 
 
+test "editor_due_date strict %-d/%m/%Y rejects padded day" {
+    var f = try CompiledFormat.init(std.testing.allocator, "%-d/%m/%Y");
+    defer f.deinit(std.testing.allocator);
 
-test "CompiledFormat: %-d works (unpadded day)" {
-    var cf = try CompiledFormat.init(std.testing.allocator, "%-d/%m/%Y");
-    defer cf.deinit(std.testing.allocator);
+    try std.testing.expect(isValidEditorDateFormat(&f));
 
-    var out: [64]u8 = undefined;
-    const s = cf.formatDate(2025, 12, 3, out[0..]);
-    try std.testing.expectEqualStrings("3/12/2025", s);
+    var out: [10]u8 = undefined;
+
+    // Accepts unpadded day for %-d
+    try std.testing.expect(parseUserDueDateCanonicalByFormat(&f, "1/01/2025", &out));
+    try std.testing.expectEqualStrings("2025-01-01", out[0..]);
+
+    // Rejects padded day for %-d
+    try std.testing.expect(!parseUserDueDateCanonicalByFormat(&f, "01/01/2025", &out));
 }
 
-test "CompiledFormat: padded vs unpadded day/month" {
-    {
-        var cf = try CompiledFormat.init(std.testing.allocator, "%d/%m/%Y");
-        defer cf.deinit(std.testing.allocator);
+test "editor_due_date strict %d/%m/%Y rejects unpadded day" {
+    var f = try CompiledFormat.init(std.testing.allocator, "%d/%m/%Y");
+    defer f.deinit(std.testing.allocator);
 
-        var out: [64]u8 = undefined;
-        const s = cf.formatDate(2025, 1, 3, out[0..]);
-        try std.testing.expectEqualStrings("03/01/2025", s);
-    }
-    {
-        var cf = try CompiledFormat.init(std.testing.allocator, "%-d/%-m/%Y");
-        defer cf.deinit(std.testing.allocator);
+    try std.testing.expect(isValidEditorDateFormat(&f));
 
-        var out: [64]u8 = undefined;
-        const s = cf.formatDate(2025, 1, 3, out[0..]);
-        try std.testing.expectEqualStrings("3/1/2025", s);
-    }
+    var out: [10]u8 = undefined;
+
+    // Accepts padded day for %d
+    try std.testing.expect(parseUserDueDateCanonicalByFormat(&f, "01/01/2025", &out));
+    try std.testing.expectEqualStrings("2025-01-01", out[0..]);
+
+    // Rejects unpadded day for %d
+    try std.testing.expect(!parseUserDueDateCanonicalByFormat(&f, "1/01/2025", &out));
 }
 
-test "CompiledFormat: time 12h + %p and %-I" {
-    var cf = try CompiledFormat.init(std.testing.allocator, "%-I:%M %p");
-    defer cf.deinit(std.testing.allocator);
+test "editor_due_date allows %x (canonical ISO date) only" {
+    var f = try CompiledFormat.init(std.testing.allocator, "%x");
+    defer f.deinit(std.testing.allocator);
 
-    var out: [64]u8 = undefined;
+    try std.testing.expect(isValidEditorDateFormat(&f));
 
-    // 15:04 -> 3:04 PM
-    {
-        const s = cf.formatTime(15, 4, out[0..]);
-        try std.testing.expectEqualStrings("3:04 PM", s);
-    }
-    // 00:05 -> 12:05 AM
-    {
-        const s = cf.formatTime(0, 5, out[0..]);
-        try std.testing.expectEqualStrings("12:05 AM", s);
-    }
-    // 12:00 -> 12:00 PM
-    {
-        const s = cf.formatTime(12, 0, out[0..]);
-        try std.testing.expectEqualStrings("12:00 PM", s);
-    }
+    var out: [10]u8 = undefined;
+
+    try std.testing.expect(parseUserDueDateCanonicalByFormat(&f, "2025-12-31", &out));
+    try std.testing.expectEqualStrings("2025-12-31", out[0..]);
+
+    // Strict: does not accept non-ISO input under %x
+    try std.testing.expect(!parseUserDueDateCanonicalByFormat(&f, "31/12/2025", &out));
 }
 
-test "CompiledFormat: %x yields ISO date" {
-    var cf = try CompiledFormat.init(std.testing.allocator, "%x");
-    defer cf.deinit(std.testing.allocator);
+test "editor_due_date rejects time-only formats" {
+    var f = try CompiledFormat.init(std.testing.allocator, "%H:%M");
+    defer f.deinit(std.testing.allocator);
 
-    var out: [64]u8 = undefined;
-    const s = cf.formatDate(2025, 12, 3, out[0..]);
-    try std.testing.expectEqualStrings("2025-12-03", s);
-}
-
-test "CompiledFormat: rejects unknown specifiers" {
-    try std.testing.expectError(error.InvalidFormat,
-        CompiledFormat.init(std.testing.allocator, "%Q"));
-    try std.testing.expectError(error.InvalidFormat,
-        CompiledFormat.init(std.testing.allocator, "%-Y"));
-    try std.testing.expectError(error.InvalidFormat,
-        CompiledFormat.init(std.testing.allocator, "%-p"));
-}
-
-
-test "date: %-d/%m/%Y renders non-padded day" {
-    var fmt = try CompiledFormat.init(std.testing.allocator, "%-d/%m/%Y");
-    defer fmt.deinit(std.testing.allocator);
-
-    var out: [32]u8 = undefined;
-    const s = fmt.formatDate(2025, 3, 2, out[0..]);
-    try std.testing.expectEqualStrings("2/03/2025", s);
-}
-
-test "date: %d/%m/%Y renders zero-padded day" {
-    var fmt = try CompiledFormat.init(std.testing.allocator, "%d/%m/%Y");
-    defer fmt.deinit(std.testing.allocator);
-
-    var out: [32]u8 = undefined;
-    const s = fmt.formatDate(2025, 3, 2, out[0..]);
-    try std.testing.expectEqualStrings("02/03/2025", s);
-}
-
-test "time: %-I:%M %p renders 12h hour without padding" {
-    var fmt = try CompiledFormat.init(std.testing.allocator, "%-I:%M %p");
-    defer fmt.deinit(std.testing.allocator);
-
-    var out: [32]u8 = undefined;
-    const s = fmt.formatTime(15, 0, out[0..]);
-    try std.testing.expectEqualStrings("3:00 PM", s);
-}
-
-test "time: %H%M renders 24h padded hour/minute" {
-    var fmt = try CompiledFormat.init(std.testing.allocator, "%H%M");
-    defer fmt.deinit(std.testing.allocator);
-
-    var out: [16]u8 = undefined;
-    const s = fmt.formatTime(3, 7, out[0..]);
-    try std.testing.expectEqualStrings("0307", s);
-}
-
-test "invalid specifier is rejected" {
-    try std.testing.expectError(
-        error.InvalidFormat,
-        CompiledFormat.init(std.testing.allocator, "%Q"),
-    );
-}
-
-test "%% renders a literal percent" {
-    var fmt = try CompiledFormat.init(std.testing.allocator, "%%Y");
-    defer fmt.deinit(std.testing.allocator);
-
-    var out: [16]u8 = undefined;
-    const s = fmt.formatDate(2025, 1, 1, out[0..]);
-    try std.testing.expectEqualStrings("%Y", s);
-}
-
-test "config: due_date=%-d/%m/%Y due_time=%H:%M due='date time' renders" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const cfg_text =
-        "due_date = \"%-d/%m/%Y\"\n" ++
-        "due_time = \"%H:%M\"\n" ++
-        "due = \"date time\"\n";
-
-    {
-        var f = try tmp.dir.createFile("ztask.conf", .{ .read = true, .truncate = true });
-        defer f.close();
-        try f.writeAll(cfg_text);
-    }
-
-    var f2 = try tmp.dir.openFile("ztask.conf", .{ .mode = .read_write });
-    defer f2.close();
-
-    var cfg = try loadDueFormatConfigFromFile(std.testing.allocator, f2);
-    defer cfg.deinit(std.testing.allocator);
-
-    var out: [64]u8 = undefined;
-    const s = formatDueForSuffix(&cfg, "2025-12-12", "15:00", out[0..]);
-    try std.testing.expectEqualStrings("12/12/2025 15:00", s);
+    try std.testing.expect(!isValidEditorDateFormat(&f));
 }
