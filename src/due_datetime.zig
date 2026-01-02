@@ -335,7 +335,7 @@ pub fn loadDueFormatConfigFromFile(
     errdefer tmpl.deinit(allocator);
 
 
-    var editor_date: ?CompiledFormat = null;
+    var editor_date: ?CompiledFormat = try CompiledFormat.init(allocator, "%x");
     errdefer if (editor_date) |*f| f.deinit(allocator);
 
     // Read config file once.
@@ -350,12 +350,12 @@ pub fn loadDueFormatConfigFromFile(
             "due = \"date time\"\n" ++
             "editor_due_date = \"%x\"\n";
         _ = try file.writeAll(seed);
-        return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
+        return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl, .editor_date = editor_date };
     }
 
     // Cap size to keep latency bounded. Too big => keep defaults.
     if (st.size > 16 * 1024) {
-        return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl };
+        return .{ .date = date_fmt, .time = time_fmt, .tmpl = tmpl, .editor_date = editor_date };
     }
 
     var buf = try allocator.alloc(u8, @intCast(st.size));
