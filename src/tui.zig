@@ -3185,7 +3185,7 @@ fn validateEditorFields(
     }
 
     if (d == .invalid) {
-        editor.toastError("invalid due date (use YYYY-MM-DD or D/M/YY)");
+        editor.toastError("invalid due date (use YYYY-MM-DD or check config)");
         return .{ .ok = false, .due_date = due_date, .due_time = due_time, .repeat = repeat };
     }
 
