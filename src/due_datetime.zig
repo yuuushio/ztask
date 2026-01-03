@@ -745,22 +745,6 @@ const CompiledTemplate = struct {
                 }
             }
 
-            // Bare whole-word placeholders (to honor your example: "date at time").
-            if (matchWord(raw, i, "date")) {
-                try appendLitTok(allocator, &list, lit_start, i);
-                try list.append(allocator, .{ .kind = .date, .off = 0, .len = 0 });
-                i += "date".len;
-                lit_start = i;
-                continue;
-            }
-            if (matchWord(raw, i, "time")) {
-                try appendLitTok(allocator, &list, lit_start, i);
-                try list.append(allocator, .{ .kind = .time, .off = 0, .len = 0 });
-                i += "time".len;
-                lit_start = i;
-                continue;
-            }
-
             i += 1;
         }
 
