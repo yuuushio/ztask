@@ -9,6 +9,12 @@ Most task management applications suffer from feature bloat, poor keyboard navig
 - Plain text storage
 - Zero cognitive overhead: Simple rules, no complex workflows
 
+## Preview
+
+![Preview1](_assets/preview_1.png)
+
+![Preview1](_assets/preview_2.png)
+
 ## Features
 
 - **Three-state task management**: `[ ]` todo → `[@]` ongoing → `[x]` done
